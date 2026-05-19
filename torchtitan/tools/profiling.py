@@ -7,7 +7,9 @@
 import contextlib
 import os
 import pickle
+import re
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 
 import torch
@@ -16,6 +18,102 @@ from torchtitan.tools.utils import device_module
 
 # how much memory allocation/free ops to record in memory snapshots
 MEMORY_SNAPSHOT_MAX_ENTRIES = 100000
+
+# Pattern to strip layer/module indices from op names for grouping.
+# Matches things like "(layers.4)", "(output)", "(norm)", "(layers.30.attn)", etc.
+_LAYER_SUFFIX_RE = re.compile(r"\s*\((?:layers\.\d+[^)]*|[a-z_]+)\)\s*$")
+
+
+def _build_grouped_summary(key_averages, sort_by: str, row_limit: int = 50) -> str:
+    """
+    Build a summary table where ops are grouped by base name.
+
+    E.g. all 'FSDP::post_backward_reduce (layers.N)' entries become one
+    'FSDP::post_backward_reduce' row with summed times and counts.
+    """
+    groups: dict[str, dict] = defaultdict(
+        lambda: {
+            "cpu_time_total": 0.0,
+            "device_time_total": 0.0,
+            "self_cpu_time_total": 0.0,
+            "self_device_time_total": 0.0,
+            "count": 0,
+        }
+    )
+
+    for evt in key_averages:
+        base_name = _LAYER_SUFFIX_RE.sub("", evt.key)
+        g = groups[base_name]
+        g["cpu_time_total"] += getattr(evt, "cpu_time_total", 0)
+        g["self_cpu_time_total"] += getattr(evt, "self_cpu_time_total", 0)
+        g["count"] += evt.count
+        # Try device_time_total first (newer PyTorch), then cuda/xpu variants
+        device_total = (
+            getattr(evt, "device_time_total", 0)
+            or getattr(evt, "cuda_time_total", 0)
+            or getattr(evt, "xpu_time_total", 0)
+        )
+        self_device_total = (
+            getattr(evt, "self_device_time_total", 0)
+            or getattr(evt, "self_cuda_time_total", 0)
+            or getattr(evt, "self_xpu_time_total", 0)
+        )
+        g["device_time_total"] += device_total
+        g["self_device_time_total"] += self_device_total
+
+    # Sort by device time or cpu time
+    if "cuda" in sort_by or "xpu" in sort_by:
+        sort_col = "device_time_total"
+    else:
+        sort_col = sort_by
+    rows = sorted(groups.items(), key=lambda x: x[1].get(sort_col, 0), reverse=True)
+    rows = rows[:row_limit]
+
+    # Build table
+    use_device = "cuda" in sort_by or "xpu" in sort_by
+    header_device = sort_by.replace("_time_total", "").upper()
+
+    lines = []
+    sep = "-" * 60 + "  " + "  ".join(["-" * 12] * (5 if use_device else 3))
+    if use_device:
+        header = (
+            f"{'Name':>60s}  {'Self CPU':>12s}  {'CPU total':>12s}  "
+            f"{'Self ' + header_device:>12s}  {header_device + ' total':>12s}  {'# Calls':>12s}"
+        )
+    else:
+        header = (
+            f"{'Name':>60s}  {'Self CPU':>12s}  {'CPU total':>12s}  {'# Calls':>12s}"
+        )
+    lines.append(sep)
+    lines.append(header)
+    lines.append(sep)
+
+    def fmt_us(us: float) -> str:
+        if us >= 1e6:
+            return f"{us / 1e6:.3f}s"
+        elif us >= 1e3:
+            return f"{us / 1e3:.3f}ms"
+        else:
+            return f"{us:.3f}us"
+
+    for name, g in rows:
+        display_name = name if len(name) <= 60 else name[:57] + "..."
+        if use_device:
+            lines.append(
+                f"{display_name:>60s}  {fmt_us(g['self_cpu_time_total']):>12s}  "
+                f"{fmt_us(g['cpu_time_total']):>12s}  "
+                f"{fmt_us(g['self_device_time_total']):>12s}  "
+                f"{fmt_us(g['device_time_total']):>12s}  "
+                f"{g['count']:>12d}"
+            )
+        else:
+            lines.append(
+                f"{display_name:>60s}  {fmt_us(g['self_cpu_time_total']):>12s}  "
+                f"{fmt_us(g['cpu_time_total']):>12s}  "
+                f"{g['count']:>12d}"
+            )
+    lines.append(sep)
+    return "\n".join(lines)
 
 
 # TODO: introduce an owner class, namely Profiler
@@ -117,6 +215,75 @@ def maybe_enable_profiling(
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
             )
+
+            # Save profiler key averages table (rank 0 only)
+            if rank == 0:
+                key_averages = prof.key_averages()
+                tables = []
+                grouped_tables = []
+                if torch.cuda.is_available():
+                    sort_key = "cuda_time_total"
+                    tables.append(
+                        key_averages.table(
+                            sort_by=sort_key,
+                            max_name_column_width=60,
+                            row_limit=100,
+                        )
+                    )
+                    grouped_tables.append(
+                        _build_grouped_summary(key_averages, sort_by=sort_key)
+                    )
+                elif torch.xpu.is_available():
+                    sort_key = "xpu_time_total"
+                    tables.append(
+                        key_averages.table(
+                            sort_by=sort_key,
+                            max_name_column_width=60,
+                            row_limit=100,
+                        )
+                    )
+                    grouped_tables.append(
+                        _build_grouped_summary(key_averages, sort_by=sort_key)
+                    )
+                if len(key_averages) > 0 and hasattr(key_averages[0], "cpu_time_total"):
+                    tables.append(
+                        key_averages.table(
+                            sort_by="cpu_time_total",
+                            max_name_column_width=60,
+                            row_limit=100,
+                        )
+                    )
+                    grouped_tables.append(
+                        _build_grouped_summary(
+                            key_averages, sort_by="cpu_time_total"
+                        )
+                    )
+                # Print detailed tables to stdout
+                for t in tables:
+                    print(t)
+                # Print grouped summary
+                print("\n=== Grouped Summary (ops aggregated across layers) ===")
+                for t in grouped_tables:
+                    print(t)
+
+                # Save detailed tables
+                summary_file = os.path.join(curr_trace_dir, "profiler_key_averages.txt")
+                with open(summary_file, "w") as f:
+                    for t in tables:
+                        f.write(t)
+                        f.write("\n")
+                # Save grouped summary
+                grouped_file = os.path.join(
+                    curr_trace_dir, "profiler_key_averages_grouped.txt"
+                )
+                with open(grouped_file, "w") as f:
+                    for t in grouped_tables:
+                        f.write(t)
+                        f.write("\n")
+                logger.info(
+                    f"Profiler key averages saved to {summary_file} "
+                    f"and grouped summary to {grouped_file}"
+                )
 
         logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
 
