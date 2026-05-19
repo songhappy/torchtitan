@@ -44,6 +44,11 @@ def _get_save_ops() -> set:
         # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
         torch._higher_order_ops.flex_attention,
         torch.ops.aten.linear.default,
+        # topk can be non-deterministic on some devices (e.g. XPU) when
+        # recomputed during activation checkpointing, causing MoE routing
+        # mismatches.  Saving its outputs is cheap (just top-k scores and
+        # indices per token) and guarantees stable expert assignments.
+        torch.ops.aten.topk.default,
         # Inductor compiled code (available when torch.compile is used)
         (torch._higher_order_ops, "inductor_compiled_code"),
         # torch_attn custom backend
