@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 # must run before torch import
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_XPU_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torchstore as ts
@@ -137,9 +138,9 @@ class Provisioner:
     In non-colocated mode, the trainer and generator run on separate GPU
     meshes (e.g. GPUs 0-3 for training, GPUs 4-7 for generation). Each
     call to `allocate(n)` reserves the next *n* GPUs and returns a
-    bootstrap callable that sets `CUDA_VISIBLE_DEVICES` before CUDA
-    initializes in the spawned process, ensuring each mesh only sees its
-    own devices.
+    bootstrap callable that sets the device visibility environment variable
+    before the accelerator runtime initializes in the spawned process,
+    ensuring each mesh only sees its own devices.
     """
 
     def __init__(self, total_gpus: int = 8):
@@ -160,9 +161,14 @@ class Provisioner:
         self.next_gpu += num_gpus
 
         def _bootstrap():
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(g) for g in gpu_ids)
-            # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
             import torch  # noqa: F401
+
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                os.environ["ZE_AFFINITY_MASK"] = ",".join(str(g) for g in gpu_ids)
+            else:
+                os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    str(g) for g in gpu_ids
+                )
 
         return _bootstrap
 

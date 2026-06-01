@@ -32,11 +32,29 @@ To register TorchTitan models with vLLM:
     )
 """
 
-from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
-from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
+"""Lazy-import vLLM-related symbols.
+
+Importing :mod:`torchtitan.experiments.rl.models.vllm_wrapper` requires
+the ``vllm`` package, which is not installed on every device backend
+(notably Intel XPU has no upstream vLLM wheel as of writing). Loading
+the wrapper eagerly therefore prevents anything in this experiments
+package from importing on XPU. The ``__getattr__`` shim keeps the
+public API (``VLLMModelWrapper``, ``registry_to_vllm``) stable while
+deferring the import to first use.
+"""
 
 
 __all__ = [
     "VLLMModelWrapper",
     "registry_to_vllm",  # Export register function for manual use
 ]
+
+
+def __getattr__(name):
+    if name == "VLLMModelWrapper":
+        from torchtitan.experiments.rl.models.vllm_wrapper import VLLMModelWrapper
+        return VLLMModelWrapper
+    if name == "registry_to_vllm":
+        from torchtitan.experiments.rl.models.vllm_registry import registry_to_vllm
+        return registry_to_vllm
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

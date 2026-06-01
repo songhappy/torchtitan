@@ -12,6 +12,7 @@ Each function returns a complete ``RLTrainer.Config`` and is discoverable by
 """
 
 from torchtitan.components.checkpoint import CheckpointManager
+from torchtitan.components.lora import LoRAConverter
 from torchtitan.components.lr_scheduler import LRSchedulersContainer
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.config import (
@@ -263,5 +264,153 @@ def rl_grpo_qwen3_0_6b_batch_invariant() -> RLTrainer.Config:
                 max_tokens=100,
             ),
             debug=batch_invariant_config,
+        ),
+    )
+
+
+def rl_grpo_lora_qwen3_0_6b() -> RLTrainer.Config:
+    """GRPO + LoRA training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train).
+
+    Uses LoRA adapters on attention projections to reduce trainable parameters
+    while maintaining GRPO training effectiveness. Suitable for memory-constrained
+    setups and rapid iteration.
+    """
+    group_size = 8
+    return RLTrainer.Config(
+        model_spec=model_registry(
+            "0.6B",
+            attn_backend="varlen",
+            converters=[
+                LoRAConverter.Config(
+                    rank=32,
+                    alpha=32.0,
+                    target_modules=["wq", "wkv", "wo"],
+                ),
+            ],
+        ),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_steps=10,
+        num_prompts_per_step=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=8, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=2e-5),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+                disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=4,
+                data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                n=group_size,
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
+        ),
+    )
+
+
+def rl_grpo_lora_qwen3_0_6b_xpu() -> RLTrainer.Config:
+    """GRPO + LoRA training config for Qwen3-0.6B on Intel XPU.
+
+    Optimized for Intel Data Center GPU Max series. Uses LoRA adapters
+    on attention and MLP projections for parameter-efficient GRPO training.
+
+    XPU-specific adjustments:
+    - Uses aot_eager compile backend (inductor XPU support varies)
+    - Smaller TP degree suitable for typical XPU node configs
+    - bfloat16 training (natively supported on Intel GPUs)
+    """
+    group_size = 8
+    return RLTrainer.Config(
+        model_spec=model_registry(
+            "0.6B",
+            attn_backend="varlen",
+            converters=[
+                LoRAConverter.Config(
+                    rank=32,
+                    alpha=32.0,
+                    target_modules=["wq", "wkv", "wo", "w1", "w2", "w3"],
+                ),
+            ],
+        ),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        num_steps=10,
+        num_prompts_per_step=5,
+        num_validation_samples=20,
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        env=SumDigitsEnv.Config(seed=42, correctness_reward=1.0, format_reward=0.3),
+        validation_env=SumDigitsEnv.Config(
+            seed=99, correctness_reward=1.0, format_reward=0.3
+        ),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        batcher=Batcher.Config(
+            batch=BatchConfig(local_batch_size=2, global_batch_size=4, seq_len=2048),
+        ),
+        trainer=PolicyTrainer.Config(
+            optimizer=OptimizersContainer.Config(lr=2e-5),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+                disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=10,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=ParallelismConfig(
+                tensor_parallel_degree=2,
+                data_parallel_replicate_degree=1,
+                enable_sequence_parallel=False,
+                disable_loss_parallel=True,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                n=group_size,
+                temperature=0.8,
+                top_p=0.95,
+                max_tokens=100,
+            ),
         ),
     )
