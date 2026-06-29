@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import statistics
+from typing import Annotated
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -24,6 +25,8 @@ import torch  # noqa: F401  # force torch import after PYTORCH_CUDA_ALLOC_CONF i
 import torchstore as ts
 from monarch.actor import ProcMesh
 from monarch.spmd import setup_torch_elastic_env_async
+
+import tyro.conf
 
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.experiments.rl.actors.generator import SamplingConfig, VLLMGenerator
@@ -67,7 +70,7 @@ class RLTrainer(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model_spec: ModelSpec | None = None
+        model_spec: Annotated[ModelSpec | None, tyro.conf.Suppress] = None
         """Model specification shared by trainer and generator.
         Set programmatically via config_registry (not from CLI)."""
 

@@ -419,11 +419,7 @@ class VLLMGenerator(Actor, Configurable):
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=not config.cudagraph.enable,
             attention_config=AttentionConfig(
-                backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
-                    if isinstance(inner_attn, FlexAttention.Config)
-                    else AttentionBackendEnum.CUSTOM
-                ),
+                backend=AttentionBackendEnum.FLASHINFER,
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,

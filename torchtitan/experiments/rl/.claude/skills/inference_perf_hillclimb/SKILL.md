@@ -123,6 +123,23 @@ spikes variance to +/-150 vs clean +/-1-7 -- re-run clean); NO Python-side
 logging/prints inside a patched forward (forces a torch.compile graph break);
 launch long runs detached (`setsid nohup ... &`) and clean GPU stragglers between.
 
+Polaris-specific: `nohup &; disown` does NOT survive SSH disconnect on the
+login node (per-session systemd cgroups reap user procs on logout). For
+long work prefer `qsub <script.pbs>` (batch -- detach-immune by design,
+survives any client drop) over `qsub -I + tmux` (interactive -- needs tmux
+to survive logout, only resumable on the same compute node). PBS wrapper
+shape: `#PBS -A Intel -q debug -l select=1:ncpus=64 -l walltime=01:00:00
+-l filesystems=home:grand -j oe -o <log>` then `exec bash <build_script>`.
+Login-node CPU is also OOM-prone for nvcc-heavy compiles (Marlin/CUTLASS
+templates spike to 3-5 GB per nvcc job): MAX_JOBS=2 still gets SIGKILLed
+mid-build. Long compiles MUST run on a compute node. Compute nodes have
+no outbound network, so any pip install that touches PyPI must run on a
+login node afterward; FetchContent / git-clone steps must have their
+.deps already cached before you submit. Home directory quota is 50 GB
+(soft 45 GB); vLLM + .deps + CUTLASS headers easily exceed this. Keep
+the vLLM source tree on grand (symlink ~/git/vllm -> grand) and set
+PIP_CACHE_DIR + TMPDIR to grand paths in the build script.
+
 ## Harness
 
 **Build/restore**: stock `generate.py` on main is an EXAMPLE (single prompt). Bring

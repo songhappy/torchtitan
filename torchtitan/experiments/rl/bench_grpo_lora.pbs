@@ -1,0 +1,36 @@
+#!/bin/bash
+#PBS -N bench_grpo_lora
+#PBS -l select=1:ngpus=4:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:grand
+#PBS -A Intel
+#PBS -q debug
+#PBS -o /home/songhappy/git/torchtitan/torchtitan/experiments/rl/bench_grpo_lora.out
+#PBS -e /home/songhappy/git/torchtitan/torchtitan/experiments/rl/bench_grpo_lora.err
+
+set -euo pipefail
+
+cd /home/songhappy/git/torchtitan/torchtitan/experiments/rl
+
+export MODE=grpo-lora-flex
+export STEPS=10
+export TORCHTITAN_ROOT=/home/songhappy/git/torchtitan
+export CONDA_ENV_PATH=/lus/grand/projects/Intel/songhappy/envs/monarch-cu128
+export CONDA_SH=$HOME/miniconda3/etc/profile.d/conda.sh
+export HF_ASSETS_PATH=/lus/grand/projects/Intel/models/Qwen3-0.6B
+export WANDB_MODE=disabled
+
+echo "=== PERF BASELINE: $(date -Iseconds) ==="
+echo "Config: rl_grpo_qwen3_0_6b_flex_lora"
+echo "Model: Qwen3-0.6B"
+echo "LoRA: rank=8, alpha=16, targets=[wq, wkv, wo]"
+echo "Attention: flex (trainer), FLASHINFER (generator)"
+echo "Parallelism: TP=2 trainer, TP=2 generator (4 GPUs total)"
+echo "Compile: aot_eager (trainer), disabled (generator/vLLM)"
+echo "Cudagraph: disabled"
+echo "Batch: local_batch_size=2, global_batch_size=8, seq_len=2048"
+echo "Sampling: temp=0.8, top_p=0.95, max_tokens=100"
+echo "Steps: $STEPS"
+echo "========================================="
+
+bash run_grpo_lora_a100.sh
