@@ -1,0 +1,22 @@
+#!/bin/bash
+#PBS -N grpo_lora_val
+#PBS -l select=1:ngpus=4:system=polaris
+#PBS -l walltime=01:00:00
+#PBS -l filesystems=home:grand
+#PBS -A Intel
+#PBS -q debug
+#PBS -o /home/songhappy/git/torchtitan/torchtitan/experiments/rl/grpo_lora_val.out
+#PBS -e /home/songhappy/git/torchtitan/torchtitan/experiments/rl/grpo_lora_val.err
+
+set -euo pipefail
+
+cd /home/songhappy/git/torchtitan/torchtitan/experiments/rl
+
+export MODE=grpo-lora-flex
+export TORCHTITAN_ROOT=/home/songhappy/git/torchtitan
+export CONDA_ENV_PATH=/lus/grand/projects/Intel/songhappy/envs/monarch-cu128
+export CONDA_SH=$HOME/miniconda3/etc/profile.d/conda.sh
+export HF_ASSETS_PATH=/lus/grand/projects/Intel/models/Qwen3-0.6B
+export WANDB_MODE=disabled
+
+bash run_grpo_lora_a100.sh

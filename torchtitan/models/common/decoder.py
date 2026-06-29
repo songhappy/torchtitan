@@ -291,20 +291,24 @@ class Decoder(BaseModel):
         ]
         B = positions.shape[0]
         seq_len = positions.shape[1]
+        kwargs = dict(
+            device=positions.device,
+            BLOCK_SIZE=attn_config.inner_attention.block_size,
+        )
+        import inspect
+        from torch.nn.attention.flex_attention import create_block_mask
+
+        if "separate_full_blocks" in inspect.signature(
+            create_block_mask
+        ).parameters:
+            kwargs["separate_full_blocks"] = not is_in_batch_invariant_mode()
         return create_attention_mask(
             and_masks(*mask_mods),
             B,
             None,
             seq_len,
             seq_len,
-            device=positions.device,
-            BLOCK_SIZE=attn_config.inner_attention.block_size,
-            # when separate_full_blocks = True, kernel iterates through
-            # full blocks first (blocks where all elements are unmasked)
-            # but which blocks are "full" vs "partial" changes depending
-            # on the particular batch
-            # for batch invariance, we disable this optimization
-            separate_full_blocks=not is_in_batch_invariant_mode(),
+            **kwargs,
         )
 
     def get_attention_masks(

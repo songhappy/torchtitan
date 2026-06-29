@@ -123,6 +123,36 @@ def rl_grpo_qwen3_0_6b_varlen() -> RLTrainer.Config:
     )
 
 
+def rl_grpo_qwen3_0_6b_varlen_lora() -> RLTrainer.Config:
+    """GRPO + LoRA on attention projections for Qwen3-0.6B (6 GPUs).
+
+    Reuses ``rl_grpo_qwen3_0_6b_varlen`` and re-resolves the model spec
+    so ``LMHeadCastConverter`` runs before ``LoRAConverter``: LoRA wraps
+    every non-target Linear in ``FrozenConfig``, which would otherwise
+    hide the ``lm_head`` Linear from the cast converter's lookup.
+
+    For Qwen3 the attention config tree exposes ``wq``, ``wkv``, and
+    ``wo`` (a single shared ``wkv`` Linear builds both wk and wv at
+    runtime), so ``target_modules`` must use ``wkv``, not ``wk`` / ``wv``.
+    """
+    from torchtitan.components.lora import LoRAConverter
+
+    config = rl_grpo_qwen3_0_6b_varlen()
+    config.model_spec = model_registry(
+        "0.6B",
+        attn_backend="varlen",
+        converters=[
+            LMHeadCastConverter.Config(),
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
+                target_modules=["wq", "wkv", "wo"],
+            ),
+        ],
+    )
+    return config
+
+
 def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
     """GRPO training config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train)."""
     group_size = 8
@@ -173,6 +203,33 @@ def rl_grpo_qwen3_0_6b_flex() -> RLTrainer.Config:
             ),
         ),
     )
+
+
+def rl_grpo_qwen3_0_6b_flex_lora() -> RLTrainer.Config:
+    """GRPO + LoRA with flex attention (4 GPUs: 2 gen + 2 train).
+
+    Keeps flex attention for the trainer (varlen requires FA3, unavailable
+    on A100 with torch 2.12). The generator always uses FLASHINFER backend
+    regardless of model_spec attention type.
+    """
+    from torchtitan.components.lora import LoRAConverter
+
+    config = rl_grpo_qwen3_0_6b_flex()
+    config.model_spec = model_registry(
+        "0.6B",
+        attn_backend="flex",
+        converters=[
+            LMHeadCastConverter.Config(),
+            LoRAConverter.Config(
+                rank=8,
+                alpha=16.0,
+                target_modules=["wq", "wkv", "wo"],
+            ),
+        ],
+    )
+    config.generator.gpu_memory_limit = 0.85
+    config.generator.cudagraph.enable = False
+    return config
 
 
 def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> RLTrainer.Config:
