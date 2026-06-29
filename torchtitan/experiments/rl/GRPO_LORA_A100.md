@@ -270,14 +270,41 @@ vLLM installed via `VLLM_TARGET_DEVICE=empty pip install -e . --no-build-isolati
 from pre-built source at `/lus/grand/projects/Intel/songhappy/vllm`.
 Uses existing `.so` files; no cmake rebuild needed.
 
-### Configuration fixes applied
+### Code changes (vs. upstream main)
 
-1. **generator.py**: Always use `AttentionBackendEnum.FLASHINFER` for the generator
-   (flex crashes on A100 triton shared memory; varlen/CUSTOM needs FA3)
-2. **config_registry.py**: `rl_grpo_qwen3_0_6b_flex_lora` uses `attn_backend="flex"`
-   in model_spec (trainer needs flex; varlen needs FA3 which A100 lacks)
-3. **decoder.py**: Conditionally pass `separate_full_blocks` to `create_block_mask`
-   (parameter not available in torch 2.12.0.dev20260408)
+1. **`torchtitan/experiments/rl/actors/generator.py`**: Hardcode
+   `AttentionBackendEnum.FLASHINFER` for the vLLM generator, replacing the
+   conditional flex/custom logic.
+   - **Why**: On A100 (SM 8.0), flex attention crashes triton (332KB shared memory
+     exceeds 164KB hardware limit), and varlen/CUSTOM requires FA3 which is
+     unavailable on A100. FLASHINFER uses pre-compiled CUDA kernels that work.
+
+2. **`torchtitan/experiments/rl/examples/alphabet_sort/config_registry.py`**: Add
+   `rl_grpo_qwen3_0_6b_varlen_lora` and `rl_grpo_qwen3_0_6b_flex_lora` configs.
+   - **Why**: Enable GRPO+LoRA on A100. Key decisions: LMHeadCastConverter must
+     come before LoRAConverter (LoRA wraps non-targets in FrozenConfig, hiding
+     lm_head from the cast converter). Qwen3 uses a single `wkv` Linear for both
+     wk and wv, so target_modules is `["wq", "wkv", "wo"]`. gpu_memory_limit=0.85
+     and cudagraph=disabled for 40GB A100 memory constraints.
+
+3. **`torchtitan/models/common/decoder.py`**: Conditionally pass
+   `separate_full_blocks` to `create_block_mask` by inspecting the function
+   signature at runtime.
+   - **Why**: torch 2.12.0.dev20260408 does not have this parameter. Without the
+     check, the call crashes with an unexpected keyword argument error.
+
+4. **`torchtitan/experiments/rl/trainer.py`**: Add `tyro.conf.Suppress` annotation
+   to the `model_spec` field.
+   - **Why**: `ModelSpec` is a complex nested object that cannot be parsed from CLI.
+     Suppressing it prevents tyro from exposing it as a CLI flag (it is always set
+     programmatically via config_registry).
+
+5. **`torchtitan/experiments/rl/.claude/skills/inference_perf_hillclimb/SKILL.md`**:
+   Add Polaris-specific operational notes (PBS vs nohup, OOM on login nodes,
+   home quota management, compute node network isolation).
+   - **Why**: Document hard-learned environment constraints so future work does
+     not repeat failed approaches (e.g. nohup dying on SSH disconnect, nvcc
+     OOM-killing login node builds).
 
 ### Training metrics (job 7222864, debug queue, 4x A100-40GB)
 
