@@ -894,6 +894,41 @@ class VLLMGenerator(Actor, Configurable):
         # --- Continuous-batching state (see the class docstring) ---
         self._rank = dist.get_rank()
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
+        # Per-node weight broadcast: one rank per node pulls from TorchStore,
+        # then broadcasts locally to same-node ranks. This keeps cross-node
+        # traffic at 1x per generator node regardless of generator count.
+        # On multi-node generators with XPU, skip the broadcast optimization
+        # to avoid xccl subgroup conflicts with TorchStore's own xccl PGs.
+        if torch.cuda.is_available():
+            _wb_backend = "nccl"
+        else:
+            _wb_backend = "xccl"
+        # Discover node topology: gather hostnames from all generator ranks
+        import socket as _socket
+        _hostname = _socket.gethostname()
+        _world_size = dist.get_world_size()
+        _all_hostnames = [None] * _world_size
+        dist.all_gather_object(_all_hostnames, _hostname)
+        # Group ranks by hostname; first rank on each node is the "leader"
+        _node_ranks: dict[str, list[int]] = {}
+        for r, h in enumerate(_all_hostnames):
+            _node_ranks.setdefault(h, []).append(r)
+        _my_node_ranks = _node_ranks[_hostname]
+        _num_gen_nodes = len(_node_ranks)
+        self._is_node_leader = (self._rank == _my_node_ranks[0])
+        # Create per-node xccl broadcast groups so only one rank per node
+        # pulls from TorchStore, then broadcasts locally. new_group is a
+        # collective: ALL ranks must call it for EACH node group in order.
+        self._weight_broadcast_group = None
+        for node_ranks in _node_ranks.values():
+            grp = dist.new_group(ranks=node_ranks, backend=_wb_backend)
+            if self._rank in node_ranks:
+                self._weight_broadcast_group = grp
+        # For multi-node generators, stagger pulls so nodes don't all hit
+        # TorchStore simultaneously (causes deadlock with xccl backend).
+        self._num_gen_nodes = _num_gen_nodes
+        self._my_node_idx = list(_node_ranks.keys()).index(_hostname)
+        self._weight_broadcast_src = 0  # leader is always rank 0 in the subgroup
         self._engine_loop_condition = (
             asyncio.Condition()
         )  # Signals to wake up when there is work
@@ -1243,11 +1278,26 @@ class VLLMGenerator(Actor, Configurable):
         if get_spmd_backend() == "spmd_types":
             await self._get_spmd_state_dict(model_sd, model=model)
         else:
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=model_sd,
-                strict=False,
-                direct_rdma=False,
+            # One leader per node pulls from TorchStore, then broadcasts
+            # locally to same-node ranks via xccl. For multi-node generators,
+            # stagger pulls so nodes don't overwhelm TorchStore simultaneously.
+            for node_idx in range(self._num_gen_nodes):
+                if node_idx == self._my_node_idx and self._is_node_leader:
+                    await ts.get_state_dict(
+                        "model_state_dict",
+                        user_state_dict=model_sd,
+                        strict=False,
+                        direct_rdma=False,
+                    )
+                if self._num_gen_nodes > 1:
+                    await asyncio.to_thread(
+                        dist.barrier, group=self._broadcast_group
+                    )
+            tensors = [v for v in model_sd.values() if isinstance(v, torch.Tensor)]
+            await asyncio.to_thread(
+                dist._broadcast_coalesced,
+                self._weight_broadcast_group, tensors, 256_000_000,
+                self._weight_broadcast_src,
             )
         # state_dict() returns hook-produced copies for fused modules (e.g.
         # FusedQKVLinear's wqkv -> wq/wk/wv), so the in-place fill above never

@@ -58,7 +58,9 @@ from torchtitan.experiments.rl.routing.strategies import (
     LeastLoadedRoutingStrategy,
     StickySessionRoutingStrategy,
 )
+from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
+from torchtitan.models.qwen2 import model_registry as qwen2_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
@@ -199,7 +201,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
 def rl_grpo_lora_qwen3_0_6b() -> Controller.Config:
     """GRPO + LoRA config for Qwen3-0.6B with flex attention (4 GPUs: 2 gen + 2 train).
 
-    Uses FSDP (dp_shard=2) instead of TP for training, LoRA adapters (rank=8).
+    Uses FSDP (dp_shard=2) instead of TP for training, LoRA adapters (rank=32).
 
     On XPU, set ZE_AFFINITY_MASK for device isolation and
     TORCHINDUCTOR_MAX_AUTOTUNE=0 to avoid backward kernel resource exhaustion.
@@ -209,7 +211,7 @@ def rl_grpo_lora_qwen3_0_6b() -> Controller.Config:
         "0.6B",
         attn_backend="flex",
         converters=[
-            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
+            LoRAConverter.Config(rank=32, alpha=64.0, target_modules=["wqkv", "wo"]),
         ],
     )
     # Disable max_autotune for XPU: backward autotuning tries kernel configs
@@ -232,7 +234,7 @@ def rl_grpo_lora_qwen3_0_6b() -> Controller.Config:
         model_spec=model_spec,
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
         async_loop=AsyncLoopConfig(
-            num_training_steps=10,
+            num_training_steps=200,
             num_groups_per_train_step=8,
             group_size=group_size,
             validation=ValidationConfig(num_samples=20),
@@ -242,12 +244,12 @@ def rl_grpo_lora_qwen3_0_6b() -> Controller.Config:
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=AlphabetSortRollouter.Config(),
-        renderer=RendererConfig(name="qwen3", enable_thinking=False),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
         metrics=MetricsProcessor.Config(enable_wandb=False),
         trainer=PolicyTrainer.Config(
-            optimizer=default_adamw(lr=2e-6),
+            optimizer=default_adamw(lr=1e-4),
             lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
+                warmup_steps=5,
                 decay_type="linear",
             ),
             training=TrainingConfig(dtype="bfloat16"),
@@ -258,7 +260,7 @@ def rl_grpo_lora_qwen3_0_6b() -> Controller.Config:
             checkpoint=CheckpointManager.Config(
                 enable=True,
                 initial_load_in_hf=True,
-                interval=10,
+                interval=50,
                 last_save_model_only=False,
             ),
             loss=GRPOLoss.Config(),
@@ -274,9 +276,86 @@ def rl_grpo_lora_qwen3_0_6b() -> Controller.Config:
             ),
             checkpoint=CheckpointManager.Config(enable=False),
             sampling=SamplingConfig(
-                temperature=0.8,
+                temperature=1.0,
                 top_p=0.95,
-                max_tokens=100,
+                max_tokens=512,
+            ),
+        ),
+    )
+
+
+def rl_grpo_qwen3_0_6b_multinode() -> Controller.Config:
+    """GRPO full-parameter training for Qwen3-0.6B, multi-node via FSDP.
+
+    No LoRA -- full model parameters are sharded across dp_shard ranks.
+    Uses flex attention (compiled with max_autotune=False for XPU).
+    The multinode_launcher scales dp_shard and generator DP to fill all
+    allocated GPUs automatically.
+
+    On XPU, set ZE_AFFINITY_MASK for device isolation and
+    TORCHINDUCTOR_MAX_AUTOTUNE=0 to avoid backward kernel resource exhaustion.
+    """
+    group_size = 8
+    from torch.nn.attention.flex_attention import flex_attention
+    from torchtitan.models.common.attention import FlexAttention
+
+    FlexAttention.inductor_configs = {
+        **FlexAttention.inductor_configs,
+        "max_autotune": False,
+        "coordinate_descent_tuning": False,
+    }
+    FlexAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexAttention.inductor_configs
+    )
+    return Controller.Config(
+        model_spec=_qwen3_rl_model_registry("0.6B", attn_backend="flex"),
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=200,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=5,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=1,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=50,
+                last_save_model_only=False,
+            ),
+            loss=ChunkedLossWrapper.Config(num_chunks=8, loss_fn=GRPOLoss.Config()),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.85,
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            attention_config=AttentionConfig(),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=512,
             ),
         ),
     )
@@ -972,5 +1051,268 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
                 max_tokens=700,
             ),
             debug=batch_invariant_config,
+        ),
+    )
+
+
+def rl_grpo_lora_qwen2_5_7b() -> Controller.Config:
+    """GRPO + LoRA config for Qwen2.5-7B-Instruct with flex attention (8 GPUs: 4 gen + 4 train).
+
+    Uses TP=2 + FSDP(dp_shard=2) for training, LoRA adapters (rank=8) on
+    attention layers (wqkv, wo). Generator uses DP=2, TP=2.
+
+    Key tuning vs prior run: seq_len 512->2048 (was dropping 47% of samples),
+    temperature 1.0->1.5 (Instruct model has very low entropy ~0.05, needs more
+    exploration), group_size 4->8, num_groups 2->4 for larger effective batch.
+
+    On XPU, set ZE_AFFINITY_MASK for device isolation and
+    TORCHINDUCTOR_MAX_AUTOTUNE=0 to avoid backward kernel resource exhaustion.
+    """
+    group_size = 8
+    model_spec = qwen2_model_registry(
+        "7B",
+        attn_backend="flex",
+        converters=[
+            LMHeadCastConverter.Config(),
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
+        ],
+    )
+    from torch.nn.attention.flex_attention import flex_attention
+    from torchtitan.models.common.attention import FlexAttention
+
+    FlexAttention.inductor_configs = {
+        **FlexAttention.inductor_configs,
+        "max_autotune": False,
+        "coordinate_descent_tuning": False,
+    }
+    FlexAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexAttention.inductor_configs
+    )
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="/home/guoqiong/models/Qwen2.5-7B-Instruct",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=200,
+            num_groups_per_train_step=4,
+            max_offpolicy_steps=1,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=1, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="auto", enable_thinking=True),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=5,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=50,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.85,
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            attention_config=AttentionConfig(),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.5,
+                top_p=0.95,
+                max_tokens=512,
+            ),
+        ),
+    )
+
+
+def rl_grpo_lora_deepseek_r1_distill_7b() -> Controller.Config:
+    """GRPO + LoRA config for DeepSeek-R1-Distill-Qwen-7B (8 GPUs: 4 gen + 4 train).
+
+    R1-Distill is a reasoning model with naturally high entropy (unlike Instruct
+    models that suffer entropy collapse). Uses temperature=1.0 and seq_len=2048
+    to allow full chain-of-thought reasoning.
+
+    Same architecture as Qwen2.5-7B (Qwen2ForCausalLM), uses qwen2 model registry.
+    """
+    group_size = 8
+    model_spec = qwen2_model_registry(
+        "7B",
+        attn_backend="flex",
+        converters=[
+            LMHeadCastConverter.Config(),
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wqkv", "wo"]),
+        ],
+    )
+    from torch.nn.attention.flex_attention import flex_attention
+    from torchtitan.models.common.attention import FlexAttention
+
+    FlexAttention.inductor_configs = {
+        **FlexAttention.inductor_configs,
+        "max_autotune": False,
+        "coordinate_descent_tuning": False,
+    }
+    FlexAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexAttention.inductor_configs
+    )
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="/home/guoqiong/models/DeepSeek-R1-Distill-Qwen-7B",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=200,
+            num_groups_per_train_step=4,
+            max_offpolicy_steps=1,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=1, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="auto", enable_thinking=True),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-4),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=5,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=50,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.85,
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            attention_config=AttentionConfig(),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=512,
+            ),
+        ),
+    )
+
+
+def rl_grpo_lora_deepseek_v3_16b() -> Controller.Config:
+    """GRPO + LoRA config for DeepSeek-V3-16B MoE with flex attention (4 GPUs: 2 gen + 2 train).
+
+    Uses FSDP (dp_shard=2) with EP=2 for training, LoRA adapters (rank=8) on
+    attention layers (wq, wo). Generator uses DP=2 with EP=2.
+
+    The model trains from random init using the deepseek-moe-16b-base tokenizer.
+    The DeepSeek-V3-16B architecture differs from deepseek-moe-16b-base (MLA vs
+    standard MHA), so pretrained weights cannot be loaded.
+
+    On XPU, set ZE_AFFINITY_MASK for device isolation and
+    TORCHINDUCTOR_MAX_AUTOTUNE=0 to avoid backward kernel resource exhaustion.
+    """
+    group_size = 4
+    model_spec = deepseek_v3_model_registry(
+        "16B",
+        attn_backend="flex",
+        converters=[
+            LMHeadCastConverter.Config(),
+            LoRAConverter.Config(rank=8, alpha=16.0, target_modules=["wq", "wo"]),
+        ],
+    )
+    from torch.nn.attention.flex_attention import flex_attention
+    from torchtitan.models.common.attention import FlexAttention
+
+    FlexAttention.inductor_configs = {
+        **FlexAttention.inductor_configs,
+        "max_autotune": False,
+        "coordinate_descent_tuning": False,
+    }
+    FlexAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexAttention.inductor_configs
+    )
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="/home/guoqiong/models/deepseek-moe-16b-base",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=20,
+            num_groups_per_train_step=2,
+            max_offpolicy_steps=1,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=4),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=1, seq_len=512),
+            ),
+            training_sample_builder=TrainingSampleBuilder.Config(
+                drop_zero_std_reward_groups=False,
+            ),
+        ),
+        compile=CompileConfig(enable=False),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="auto", enable_thinking=False),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-5),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=5,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=1,
+                expert_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=False,
+            ),
+            debug=DebugConfig(seed=42),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.85,
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            attention_config=AttentionConfig(),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=1,
+                expert_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=64,
+            ),
         ),
     )
