@@ -124,31 +124,40 @@ Weight sync between them is handled by **TorchStore** (shared memory, <1s per sy
 
 ## Entry Points
 
-Single-node training goes through `train.py`; multi-node adds
-`multinode_launcher.py` under `mpiexec` (one rank per node, rank 0 also runs the
-controller).
+**Single node and multi node are genuinely different code paths**, not the same
+run at two sizes. Pick your scale first; the two have separate run sections in
+this guide:
 
-```bash
-# Single node, LoRA
-python3 -m torchtitan.experiments.rl.train \
-    --module alphabet_sort --config rl_grpo_lora_qwen3_0_6b \
-    --hf_assets_path=/path/to/model
+| | Single node | Multi node |
+|---|---|---|
+| Launch path | `train.py` directly | `multinode_launcher.py` under `mpiexec`, one rank per node (rank 0 also runs the controller) |
+| Node/mesh split | all tiles in one process group, no trainer/generator node split | launcher splits nodes half trainer / half generator |
+| Fabric env | `FI_PROVIDER=tcp` is fine -- nothing leaves the node | the CXI/oneCCL block is **mandatory**; without it `tp=8` dies and `grad_norm` corrupts |
+| `mpiexec` | not used | Cray PALS **by absolute path**, with `--cpu-bind none` |
+| Typical use | smoke tests, numerics checks, interposer validation | real runs and anything measured |
+| How to run | [Running on a single node](#running-on-a-single-node) | [Running on multiple nodes](#running-on-multiple-nodes) |
 
-# Single node, full-parameter (needs LD_PRELOAD, see below)
-python3 -m torchtitan.experiments.rl.train \
-    --module alphabet_sort --config rl_grpo_full_qwen3_0_6b_flex \
-    --hf_assets_path=/path/to/model
-```
+Everything else -- environment setup, XPU config, known issues -- is shared.
 
-Launcher scripts wrap these with the full Aurora environment:
+Crossed with the two training arms (LoRA and full-parameter) that gives four
+concrete configurations, one launcher script each:
 
-| Script | Arm | Scope |
-|--------|-----|-------|
-| `run_grpo_lora_sn.sh` | LoRA | single node |
-| `run_grpo_lora_multinode.sh` | LoRA | multi node (PBS), any node count, 2 by default |
-| `run_grpo_lora_2n.sh` | LoRA | 2 nodes; PBS header only, execs `run_grpo_lora_multinode.sh` |
-| `run_grpo_sn.sh` | full | single node, sets `LD_PRELOAD` |
-| `run_grpo_multinode.sh` | full | multi node (PBS), 8 nodes by default, sets `LD_PRELOAD` |
+| | Single node | Multi node |
+|---|---|---|
+| **LoRA** | `run_grpo_lora_sn.sh` -- [section](#single-node-lora) | `run_grpo_lora_multinode.sh` -- [section](#multiple-nodes-lora) |
+| **Full-parameter** | `run_grpo_sn.sh` -- [section](#single-node-full-parameter) | `run_grpo_multinode.sh` -- [section](#multiple-nodes-full-parameter) |
+
+| Script | Arm | Scale | Notes |
+|--------|-----|-------|-------|
+| `run_grpo_lora_sn.sh` | LoRA | 1 node | cheapest full-pipeline smoke test |
+| `run_grpo_sn.sh` | full | 1 node | sets `LD_PRELOAD`, prechecks the interposer |
+| `run_grpo_lora_multinode.sh` | LoRA | any node count, 8 by default | the validated arm: 200/200 steps at 8 nodes |
+| `run_grpo_lora_2n.sh` | LoRA | 2 nodes | PBS header only, execs `run_grpo_lora_multinode.sh` |
+| `run_grpo_multinode.sh` | full | any node count, 8 by default | sets `LD_PRELOAD`; hangs ~1 pull in 120 (issue 9) |
+
+The two `_sn` scripts and the two multinode ones differ only in arm, so the LoRA
+arm is the right place to debug anything that is not specific to full-parameter
+training.
 
 ---
 
@@ -385,54 +394,6 @@ git checkout xpu-upstream   # PR: https://github.com/pytorch/torchtitan/pull/389
 pip install -e . --no-deps --no-build-isolation
 ```
 
-### Runtime: full script to run a single-node LoRA training
-
-Copy-paste this on a compute node (e.g. `ssh <compute-node>`):
-
-```bash
-#!/bin/bash
-set -e
-
-# Environment
-source $ONEAPI_ENV_SCRIPT
-eval "$($CONDA_PREFIX_BASE/bin/conda shell.bash hook)"
-conda activate monarch
-
-# XPU runtime env vars
-export ZE_AFFINITY_MASK=0,1,2,3
-export FI_PROVIDER=tcp
-export CCL_ATL_OFI_PROVIDER=tcp
-export TORCHINDUCTOR_CACHE_DIR=~/.cache/torchinductor_xpu
-export TORCHINDUCTOR_MAX_AUTOTUNE=0
-export VLLM_ENABLE_V1_MULTIPROCESSING=1
-export HF_DATASETS_OFFLINE=1
-export HF_HUB_OFFLINE=1
-
-# Run GRPO+LoRA training (4 XPU tiles: 2 generator + 2 trainer)
-cd $TORCHTITAN_DIR
-python3 -m torchtitan.experiments.rl.train \
-    --module alphabet_sort --config rl_grpo_lora_qwen3_0_6b \
-    --hf_assets_path=$HF_ASSETS_PATH
-```
-
-Or simply run the LoRA launcher scripts:
-
-```bash
-# Single node (4 XPU tiles):
-cd $TORCHTITAN_DIR/torchtitan/experiments/rl && bash run_grpo_lora_sn.sh
-
-# Multi-node via PBS. run_grpo_lora_multinode.sh handles any node count (it
-# reads PBS_NODEFILE and auto-scales the mesh); it defaults to 2 nodes.
-cd $TORCHTITAN_DIR/torchtitan/experiments/rl
-qsub run_grpo_lora_2n.sh                      # 2 nodes, no flags needed
-qsub -l select=4 run_grpo_lora_multinode.sh   # any other node count
-qsub -l select=8 run_grpo_lora_multinode.sh
-```
-
-For full-parameter GRPO use `run_grpo_sn.sh` / `run_grpo_multinode.sh` instead --
-see [Running full-parameter GRPO](#running-full-parameter-grpo), which has one
-extra prerequisite the LoRA arm does not.
-
 ### Version summary (validated 2026-07-07)
 
 | Package | Version | Source |
@@ -446,6 +407,251 @@ extra prerequisite the LoRA arm does not.
 | torchtitan | editable | $TORCHTITAN_DIR xpu-upstream |
 | transformers | 5.9.0 | pip |
 | datasets | 4.7.0 | pip |
+
+---
+
+## Running on a single node
+
+One node, 4 XPU tiles (2 trainer + 2 generator), no trainer/generator *node*
+split -- `train.py` runs directly, with no `mpiexec` and no
+`multinode_launcher.py`. Nothing leaves the node, so `FI_PROVIDER=tcp` is correct
+and the CXI/oneCCL fabric block that multi node requires is **not** needed here.
+Use this scale for smoke tests, numerics checks, and validating the interposer --
+not for measured throughput.
+
+Both single-node scripts must run on a compute node, not the UAN. Get one with
+`qsub -I -l select=1 -l walltime=01:00:00 -A Intel-Aurora -q debug`, or just
+`qsub` the script as a batch job -- each carries its own `#PBS -l select=1`
+header.
+
+### Single node, LoRA
+
+`run_grpo_lora_sn.sh`. The cheapest thing in the repo that exercises the whole
+pipeline, and the arm to reach for first.
+
+```bash
+cd $TORCHTITAN_DIR
+
+# Batch (the script's own PBS header: select=1, 1 h, debug queue)
+qsub torchtitan/experiments/rl/run_grpo_lora_sn.sh
+
+# Or directly, on a compute node you already hold
+bash torchtitan/experiments/rl/run_grpo_lora_sn.sh
+
+# Overrides are environment variables
+NUM_STEPS=50 bash torchtitan/experiments/rl/run_grpo_lora_sn.sh
+
+# Any trailing argument is forwarded verbatim to train.py
+bash torchtitan/experiments/rl/run_grpo_lora_sn.sh --generator.gpu_memory_limit=0.85
+```
+
+Defaults: `CONFIG=rl_grpo_lora_qwen3_0_6b`, `NUM_STEPS=10`,
+`DUMP_FOLDER=outputs/rl_lora_1n`, log at
+`torchtitan/experiments/rl/train_lora_1n.log`. **No interposer** -- LoRA freezes
+the `qk_norm` weights, so its backward never asks for that weight gradient.
+
+If you would rather run the pipeline by hand than use the script, this is
+everything it sets:
+
+```bash
+#!/bin/bash
+set -e
+
+source /opt/aurora/26.26.0/oneapi/setvars.sh
+source ~/miniforge3/etc/profile.d/conda.sh
+conda activate monarch
+
+# tcp is fine at one node; see the multi-node section for why cross-node runs
+# must override these two.
+export ZE_AFFINITY_MASK=0,1,2,3
+export FI_PROVIDER=tcp
+export CCL_ATL_OFI_PROVIDER=tcp
+export TORCHINDUCTOR_CACHE_DIR=~/.cache/torchinductor_xpu
+export TORCHINDUCTOR_MAX_AUTOTUNE=0
+export VLLM_ENABLE_V1_MULTIPROCESSING=1
+export HF_DATASETS_OFFLINE=1
+export HF_HUB_OFFLINE=1
+
+cd $TORCHTITAN_DIR
+python3 -m torchtitan.experiments.rl.train \
+    --module alphabet_sort --config rl_grpo_lora_qwen3_0_6b \
+    --hf_assets_path=/flare/Aurora_deployment/intel/models/Qwen3-0.6B
+```
+
+### Single node, full-parameter
+
+`run_grpo_sn.sh`. Same shape as the LoRA arm plus one hard prerequisite: the
+`LD_PRELOAD` RMSNorm interposer must already be built, because full GRPO trains
+the `qk_norm` weights. Build it first --
+[Running full-parameter GRPO](#running-full-parameter-grpo) steps 1-3 -- or the
+script aborts before spending the allocation.
+
+```bash
+cd $TORCHTITAN_DIR
+
+# Batch
+qsub torchtitan/experiments/rl/run_grpo_sn.sh
+
+# Or directly, on a compute node you already hold
+bash torchtitan/experiments/rl/run_grpo_sn.sh
+
+# 200 steps, custom weights, interposer somewhere else
+NUM_STEPS=200 \
+HF_ASSETS_PATH=/flare/Aurora_deployment/intel/models/Qwen3-0.6B \
+INTERPOSER=/path/to/libinterpose_layernorm.so \
+bash torchtitan/experiments/rl/run_grpo_sn.sh
+
+# Trailing arguments forwarded verbatim to train.py
+bash torchtitan/experiments/rl/run_grpo_sn.sh --generator.gpu_memory_limit=0.90
+```
+
+Defaults: `CONFIG=rl_grpo_full_qwen3_0_6b_flex`, `NUM_STEPS=10`,
+`DUMP_FOLDER=outputs/rl_full_1n`, log at
+`torchtitan/experiments/rl/train_full_1n.log`.
+
+Before launching the pipeline the script runs a precheck that (a) confirms
+`libinterpose_layernorm.so` is actually mapped into the process and (b) drives a
+65536-row RMSNorm weight-grad backward. A silently ineffective `LD_PRELOAD` would
+otherwise just reproduce the old crash mid-run.
+
+---
+
+## Running on multiple nodes
+
+Multi node adds `multinode_launcher.py` under `mpiexec`, one rank per node (rank 0
+also hosts the controller). The launcher reads `PBS_NODEFILE`, splits the
+allocation half trainer / half generator, and derives
+`dp_shard = trainer_gpus / (TP * DP_REPLICATE)`. **Read the effective mesh from
+the `Mesh split` log line, never from the requested flags.** Keep `TP` inside a
+node: cross-node TP is correct but roughly 10x slower, so scale with `dp_shard`.
+
+Three things are mandatory at this scale and irrelevant at one node. Each cost
+real debugging time, so do not drop them:
+
+1. **The CXI/oneCCL fabric env block.** Without it cross-node `tp=8` dies on
+   `atl_ofi.cpp:1071 fi_cq_readerr err 5`, and `tp4`/`rep2` trains with a
+   corrupted `grad_norm` (88-2464 against a healthy 0.05-0.15). The launcher
+   scripts export it; if you hand-roll a command, copy it from them.
+2. **Cray PALS by absolute path** (`/opt/cray/pals/1.8/bin/mpiexec`). `env-3.sh`
+   puts Intel MPI's Hydra `mpiexec` first on `PATH`, and under Hydra a cross-node
+   `tp=8` run dies in a oneCCL SEND fault.
+3. **`--cpu-bind none`.** At `-ppn 1` PALS pins every rank *and its forked
+   workers* to a single core, costing 4-6x and hitting the generator hardest. It
+   masquerades as a fabric problem. Fastest triage is generator ITL: 50-56 ms
+   means unpinned, 214-268 ms means this bug is live.
+
+Both multi-node scripts carry a `#PBS -l select=8` header; a `-l select=N` on the
+`qsub` command line overrides it, and the launcher picks up whatever it gets.
+
+### Multiple nodes, LoRA
+
+`run_grpo_lora_multinode.sh`, plus `run_grpo_lora_2n.sh` as a thin `select=2`
+wrapper around it. This is the validated arm: 200/200 steps at 8 nodes,
+25.4 s/step, reward 0.222 -> 0.355.
+
+```bash
+cd $TORCHTITAN_DIR
+
+# 8 nodes (the script's own header)
+qsub torchtitan/experiments/rl/run_grpo_lora_multinode.sh
+
+# Any other node count
+qsub -l select=4 torchtitan/experiments/rl/run_grpo_lora_multinode.sh
+qsub -l select=2 -l walltime=00:30:00 torchtitan/experiments/rl/run_grpo_lora_multinode.sh
+
+# 2 nodes with no flags at all (identical, just a different PBS header)
+qsub torchtitan/experiments/rl/run_grpo_lora_2n.sh
+
+# Overrides need -v to cross into the PBS job
+NUM_STEPS=200 qsub -v NUM_STEPS torchtitan/experiments/rl/run_grpo_lora_2n.sh
+
+# Interactive on an allocation you already hold
+bash torchtitan/experiments/rl/run_grpo_lora_multinode.sh
+
+# Use only the first 2 nodes of a larger allocation
+NUM_NODES=2 bash torchtitan/experiments/rl/run_grpo_lora_multinode.sh
+```
+
+Defaults: `CONFIG=rl_grpo_lora_qwen3_0_6b`, `NUM_STEPS=150`,
+`DUMP_FOLDER=outputs/rl_lora_multinode`, log at
+`torchtitan/experiments/rl/train_lora_<N>n.log`. The `dp_shard` cap is the LoRA
+rank, so LoRA scales further on `dp_shard` than the full arm does.
+
+### Multiple nodes, full-parameter
+
+`run_grpo_multinode.sh`, **8 nodes by default**. Needs the interposer, same as
+the single-node full arm -- see
+[Running full-parameter GRPO](#running-full-parameter-grpo). The launcher hands
+it to the remote python via `env` inside `mpiexec` rather than exporting it in the
+submitting shell.
+
+```bash
+cd $TORCHTITAN_DIR
+
+# 8 nodes (the script's PBS header)
+qsub torchtitan/experiments/rl/run_grpo_multinode.sh
+
+# Different node count: -l select on the command line overrides the header
+qsub -l select=4 torchtitan/experiments/rl/run_grpo_multinode.sh
+qsub -l select=2 -l walltime=00:30:00 -q debug torchtitan/experiments/rl/run_grpo_multinode.sh
+
+# Override distributed settings (-v forwards env into the PBS job)
+TP=2 NUM_STEPS=20 qsub -l select=4 -v TP,NUM_STEPS \
+    torchtitan/experiments/rl/run_grpo_multinode.sh
+
+# Interactive on an existing allocation
+qsub -I -l select=8 -l walltime=01:00:00 -A Intel-Aurora -q debug-scaling
+bash torchtitan/experiments/rl/run_grpo_multinode.sh
+
+# Use only the first 2 nodes of a larger allocation, with extra train.py flags
+NUM_NODES=2 bash torchtitan/experiments/rl/run_grpo_multinode.sh \
+    --async_loop.group_size=16
+```
+
+`qsub` forwards **no** trailing arguments, so under PBS reach `train.py`'s own
+flags through `EXTRA_ARGS` instead:
+
+```bash
+EXTRA_ARGS=--trainer.checkpoint.load-only qsub -v EXTRA_ARGS \
+    torchtitan/experiments/rl/run_grpo_multinode.sh
+```
+
+`run_grpo_multinode.sh` overrides, all environment variables (the LoRA multinode
+script takes the same set minus `INTERPOSER`, with the LoRA defaults above):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `NUM_NODES` | all allocated nodes | use only the first N (errors if N exceeds the allocation) |
+| `PPN` | `4` | XPU tiles per node |
+| `TP` | `1` | trainer tensor parallel degree |
+| `DP_REPLICATE` | `1` | trainer data parallel replicate degree |
+| `CONFIG` | `rl_grpo_full_qwen3_0_6b_flex` | config registry entry |
+| `NUM_STEPS` | `10` | GRPO training steps |
+| `VAL_SAMPLES` | `0` | validation samples per eval |
+| `HF_ASSETS_PATH` | `/flare/Aurora_deployment/intel/models/Qwen3-0.6B` | model weights |
+| `DUMP_FOLDER` | `outputs/rl_full_multinode` | output directory |
+| `INTERPOSER` | `.../rmsnorm_interposer/libinterpose_layernorm.so` | patched kernel |
+| `MPIEXEC` | `/opt/cray/pals/1.8/bin/mpiexec` | PALS launcher (absolute path on purpose) |
+| `EXTRA_ARGS` | empty | extra `train.py` flags, for `qsub -v` |
+
+**This arm cannot currently be relied on to finish a long run.** It hangs in the
+TorchStore weight pull at 8 nodes, roughly 1 pull in 120 -- active issue 9. Its
+best result so far is 120/200 steps. LoRA is unaffected.
+
+### Multi-node operational rules
+
+Apply to both multi-node arms:
+
+- **`qdel` the job the moment training finishes.** Teardown hangs after the last
+  step -- a completed 200-step LoRA run burnt 2.5 h of its allocation printing
+  nothing after `Closing: tearing down actors`. PBS then reports
+  `Exit_status -29` (walltime kill) for a run that fully succeeded, so the exit
+  code alone is misleading.
+- **Checkpoint saving is off for 8-node runs.** The DCP save ran out of device
+  memory inside oneCCL at `dp_shard=16`. Use
+  `--trainer.checkpoint.load-only`, which still loads the pretrained weights.
+  **Never** use `--trainer.checkpoint.no-enable` to skip saves: `enable` also
+  gates *loading*, so the run silently trains a random-initialized model.
 
 ---
 
@@ -621,7 +827,7 @@ so exporting it only in the shell that calls `python3` is not enough; it must be
 inherited.
 
 ```bash
-INTERPOSER=/home/songhappy/git/torchtitan/torchtitan/experiments/rl/rmsnorm_interposer/libinterpose_layernorm.so
+INTERPOSER=$TORCHTITAN_DIR/torchtitan/experiments/rl/rmsnorm_interposer/libinterpose_layernorm.so
 export LD_PRELOAD=$INTERPOSER
 
 python3 -m torchtitan.experiments.rl.train \
@@ -644,74 +850,16 @@ override if the `.so` lives elsewhere.
 
 ### Full GRPO step 5: run
 
-Single node (4 tiles: 2 trainer + 2 generator):
+With the `.so` built and verified, the run commands are the scale-specific ones:
 
-```bash
-cd $TORCHTITAN_DIR
+- One node: [Running on a single node](#running-on-a-single-node) -- use
+  `run_grpo_sn.sh`.
+- Multi node: [Running on multiple nodes](#running-on-multiple-nodes) -- use
+  `run_grpo_multinode.sh`, including its full env-var override table.
 
-# Interactive
-qsub -I -l select=1 -l walltime=01:00:00 -A Intel-Aurora -q debug
-bash torchtitan/experiments/rl/run_grpo_sn.sh
-
-# Batch
-qsub torchtitan/experiments/rl/run_grpo_sn.sh
-
-# 200 steps, custom weights, custom interposer path
-NUM_STEPS=200 \
-HF_ASSETS_PATH=/flare/Aurora_deployment/intel/models/Qwen3-0.6B \
-INTERPOSER=/path/to/libinterpose_layernorm.so \
-bash torchtitan/experiments/rl/run_grpo_sn.sh
-
-# Any extra flag is forwarded verbatim to train.py
-bash torchtitan/experiments/rl/run_grpo_sn.sh --generator.gpu_memory_limit=0.90
-```
-
-Multi-node, **8 nodes by default**:
-
-```bash
-cd $TORCHTITAN_DIR
-
-# 8 nodes (the script's PBS header)
-qsub torchtitan/experiments/rl/run_grpo_multinode.sh
-
-# Different node count: -l select on the command line overrides the header
-qsub -l select=4 torchtitan/experiments/rl/run_grpo_multinode.sh
-qsub -l select=2 -l walltime=00:30:00 -q debug torchtitan/experiments/rl/run_grpo_multinode.sh
-
-# Override distributed settings (-v forwards env into the PBS job)
-TP=2 NUM_STEPS=20 qsub -l select=4 -v TP,NUM_STEPS \
-    torchtitan/experiments/rl/run_grpo_multinode.sh
-
-# Interactive on an existing allocation
-qsub -I -l select=8 -l walltime=01:00:00 -A Intel-Aurora -q debug-scaling
-bash torchtitan/experiments/rl/run_grpo_multinode.sh
-
-# Use only the first 2 nodes of a larger allocation, with extra train.py flags
-NUM_NODES=2 bash torchtitan/experiments/rl/run_grpo_multinode.sh \
-    --async_loop.group_size=16
-```
-
-`run_grpo_multinode.sh` overrides, all environment variables:
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `NUM_NODES` | all allocated nodes | use only the first N (errors if N exceeds the allocation) |
-| `PPN` | `4` | XPU tiles per node |
-| `TP` | `1` | trainer tensor parallel degree |
-| `DP_REPLICATE` | `1` | trainer data parallel replicate degree |
-| `CONFIG` | `rl_grpo_full_qwen3_0_6b_flex` | config registry entry |
-| `NUM_STEPS` | `10` | GRPO training steps |
-| `VAL_SAMPLES` | `0` | validation samples per eval |
-| `HF_ASSETS_PATH` | `/flare/Aurora_deployment/intel/models/Qwen3-0.6B` | model weights |
-| `DUMP_FOLDER` | `outputs/rl_full_multinode` | output directory |
-| `INTERPOSER` | `.../rmsnorm_interposer/libinterpose_layernorm.so` | patched kernel |
-| `MPIEXEC` | `/opt/cray/pals/1.8/bin/mpiexec` | PALS launcher (absolute path on purpose) |
-
-`multinode_launcher.py` splits nodes half trainer / half generator and derives
-`dp_shard = trainer_gpus / (TP * DP_REPLICATE)`. Without LoRA the `dp_shard` cap
-falls back to 4, so the excess spills onto `dp_replicate` -- read the effective
-mesh from the `Mesh split` log line. Keep `TP` inside a node: cross-node TP is
-correct but roughly 10x slower.
+Both scripts default to the full-parameter config and set `INTERPOSER`
+themselves; the only full-GRPO-specific prerequisite is that steps 1-4 above have
+actually produced the `.so` at that path.
 
 ### Full-GRPO specific gotchas
 

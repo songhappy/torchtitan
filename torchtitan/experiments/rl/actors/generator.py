@@ -19,7 +19,15 @@ import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from monarch.actor import Actor, Channel, current_rank, endpoint, Port, PortReceiver
+from monarch.actor import (
+    Actor,
+    Channel,
+    concurrent_endpoint,
+    current_rank,
+    endpoint,
+    Port,
+    PortReceiver,
+)
 from torch.distributed.tensor import DTensor
 from torchtitan.components.checkpoint import CheckpointManager
 from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
@@ -771,6 +779,9 @@ class VLLMGenerator(Actor, Configurable):
     ):
         init_logger()
         # Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
+        # Keep this at WARNING only while weight sync is healthy: a pull that
+        # hangs is undiagnosable without the transport-resolve and handshake
+        # lines, so raise it here when debugging one.
         logging.getLogger("torchstore.transport").setLevel(logging.WARNING)
         sl.init_structured_logger(
             source="rl_generator",
@@ -1000,7 +1011,12 @@ class VLLMGenerator(Actor, Configurable):
                 f"before {endpoint_name}"
             )
 
-    @endpoint
+    # @concurrent_endpoint (not @endpoint) so the actor returns after scheduling
+    # each generate() body as a background task and can immediately handle the
+    # next queued call. Plain @endpoint runs each body to completion before
+    # dequeuing the next message, serializing the concurrent generate() RPCs the
+    # controller fans out (symptom on XPU: vLLM "Running: 1", one call per ~20s).
+    @concurrent_endpoint
     @sl.log_trace_span("generate")
     async def generate(
         self,
