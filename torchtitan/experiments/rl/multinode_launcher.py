@@ -163,8 +163,13 @@ async def run_controller(
                     return r
         return None
 
+    # FSDP shards each param on dim 0, and the smallest LoRA tensor dim is the
+    # LoRA rank, so dp_shard can grow up to the rank without producing zero-sized
+    # shards (which TorchStore cannot handle). Cap at the rank -- NOT a hardcoded
+    # 4 -- so all trainer GPUs go to dp_shard (dp_replicate stays 1) whenever the
+    # rank allows; only spill to dp_replicate past that.
     lora_rank = _find_lora_rank(config.model_spec.model)
-    max_dp_shard = 4
+    max_dp_shard = lora_rank or 4
     if trainer_dp_shard > max_dp_shard:
         dp_replicate = trainer_dp_shard // max_dp_shard
         trainer_dp_shard = max_dp_shard
@@ -173,6 +178,22 @@ async def run_controller(
             f"dp_replicate={dp_replicate}"
         )
 
+    # The requested dp_replicate x dp_shard split is used as-is, including when a
+    # replicate group spans physical nodes.
+    #
+    # There used to be an auto-fold here that rewrote a cross-node replicate group
+    # into dp_shard (dp_shard *= dp_replicate, dp_replicate = 1). It was removed on
+    # 2026-07-31 after both of its premises were measured false; do not re-add it:
+    #   1. CORRECTNESS. Cross-node dp_replicate looked broken on this Monarch/XPU
+    #      (xccl/CXI) stack -- dp_shard4/rep2 exploded in bit_wise/logprob_diff and
+    #      dp_shard1/rep2 x tp4 showed grad_norm 141-1352. Both were the CXI/oneCCL
+    #      scale-out env, not the mesh: with that env and NO mesh change the same
+    #      shapes train clean at grad_norm 0.058-0.17.
+    #   2. PERF. The fold was then kept as the faster layout, but the unfolded runs
+    #      are faster on identical allocations: dp_shard4 x rep2 7163 vs 6529 tok/s,
+    #      rep2 x tp4 957 vs 900. dp_replicate all-reduces gradients once per step
+    #      while dp_shard all-gathers parameters every layer, so folding cross-node
+    #      DP onto dp_shard only adds fabric traffic.
     config.trainer.parallelism = replace(
         config.trainer.parallelism,
         data_parallel_shard_degree=trainer_dp_shard,

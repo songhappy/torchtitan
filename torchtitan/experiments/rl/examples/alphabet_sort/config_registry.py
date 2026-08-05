@@ -60,10 +60,20 @@ from torchtitan.experiments.rl.routing.strategies import (
 )
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
-from torchtitan.models.qwen2 import model_registry as qwen2_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
+
+
+def qwen2_model_registry(*args, **kwargs):
+    # The qwen2 model module is not present in this repo, so importing it at
+    # module load time would break the entire config_registry (including the
+    # qwen3 configs). Resolve it lazily: only the rl_grpo_lora_qwen2_5_* configs
+    # need it, and they raise a clear error if qwen2 support is ever added.
+    from torchtitan.models.qwen2 import model_registry as _qwen2_model_registry
+
+    return _qwen2_model_registry(*args, **kwargs)
+
 
 _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
@@ -229,6 +239,208 @@ def rl_grpo_lora_qwen3_0_6b() -> Controller.Config:
     }
     FlexAttention._compiled_flex_attn = torch.compile(
         flex_attention, options=FlexAttention.inductor_configs
+    )
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=200,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        trainer=PolicyTrainer.Config(
+            # lr=2e-6 for the parallelism scaling sweep (matches the non-LoRA RL
+            # configs); the earlier 1e-4 was tuned for standalone LoRA runs.
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=5,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                interval=50,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.85,
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            attention_config=AttentionConfig(),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=512,
+            ),
+        ),
+    )
+
+
+def rl_grpo_full_qwen3_0_6b_flex() -> Controller.Config:
+    """GRPO FULL-parameter config for Qwen3-0.6B with flex attention.
+
+    The controlled twin of ``rl_grpo_lora_qwen3_0_6b``: same flex attention, same
+    fixed 64-sequence global batch (num_groups_per_train_step=8 x group_size=8),
+    same local batch (2 x 2048), same lr, same sampling, same generator settings.
+    The ONLY difference is that no LoRAConverter is applied, so every parameter is
+    trained and the full model state is what gets pushed to the generators each
+    step.
+
+    Use this to measure what LoRA is buying (or costing) on the Aurora XPU stack.
+    ``rl_grpo_qwen3_0_6b_flex`` is NOT a valid comparison for that question -- it
+    also differs in max_tokens (100 vs 512), enable_thinking, chunked loss, TP vs
+    FSDP, and the XPU generator settings.
+
+    Two consequences of dropping LoRA, both expected rather than bugs:
+      - the optimizer state and the trainer->generator weight payload grow from
+        the adapter tensors to the whole model (~0.6B params), so the per-step
+        push/pull is much larger;
+      - ``multinode_launcher`` caps dp_shard at the LoRA rank to avoid zero-sized
+        LoRA shards, and with no LoRA that cap falls back to 4. On a 2-node run
+        (trainer dp_shard=4) this is a no-op; on 4 nodes it spills the excess onto
+        dp_replicate. Read the effective mesh from the "Mesh split" log line.
+    """
+    group_size = 8
+    # No `converters`: this is the full-parameter arm.
+    model_spec = _qwen3_rl_model_registry("0.6B", attn_backend="flex")
+    # Disable max_autotune for XPU: backward autotuning tries kernel configs that
+    # exceed XPU register limits (OUT_OF_RESOURCES). Harmless on CUDA. Must
+    # redefine _compiled_flex_attn since torch.compile captures options at
+    # definition time. Same treatment as the LoRA config -- without it the flex
+    # backward dies on XPU regardless of LoRA.
+    from torch.nn.attention.flex_attention import flex_attention
+    from torchtitan.models.common.attention import FlexAttention
+
+    FlexAttention.inductor_configs = {
+        **FlexAttention.inductor_configs,
+        "max_autotune": False,
+        "coordinate_descent_tuning": False,
+    }
+    FlexAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexAttention.inductor_configs
+    )
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-0.6B",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=200,
+            num_groups_per_train_step=8,
+            group_size=group_size,
+            validation=ValidationConfig(num_samples=20),
+            batcher=Batcher.Config(
+                batch=BatchConfig(local_batch_size=2, seq_len=2048),
+            ),
+        ),
+        compile=CompileConfig(enable=True, backend="aot_eager"),
+        rollouter=AlphabetSortRollouter.Config(),
+        renderer=RendererConfig(name="qwen3", enable_thinking=True),
+        metrics=MetricsProcessor.Config(enable_wandb=False),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=2e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=5,
+                decay_type="linear",
+            ),
+            training=TrainingConfig(dtype="bfloat16"),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=2,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,
+                # Load the pretrained weights, write nothing back. load_only
+                # suppresses every save including the forced one at last_step
+                # (_should_save returns early on load_only), while load() guards
+                # only on enable, so the initial_load_in_hf load still happens.
+                # Do NOT set enable=False to skip saves: the trainer's load()
+                # checks that same flag, so it silently trains a
+                # random-initialized model. Saving is off because the DCP save
+                # ran out of device memory inside oneCCL on multi-node XPU;
+                # interval applies again once that is fixed.
+                load_only=True,
+                interval=50,
+                last_save_model_only=False,
+            ),
+            loss=GRPOLoss.Config(),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            gpu_memory_limit=0.85,
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            attention_config=AttentionConfig(),
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=2,
+                tensor_parallel_degree=1,
+            ),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=0.95,
+                max_tokens=512,
+            ),
+        ),
+    )
+
+
+def rl_grpo_lora_qwen3_0_6b_dp8() -> Controller.Config:
+    """Diagnostic config: identical to rl_grpo_lora_qwen3_0_6b (flex) but trainer
+    data_parallel_shard_degree=8 and generator data_parallel_degree=4 (12 tiles,
+    fits ONE Aurora node). Purpose: run SINGLE-NODE to isolate whether the 4-node
+    loss explosion is caused by dp_shard>4 (LoRA sharding) or by the trainer FSDP
+    mesh crossing the node boundary. If this explodes on 1 node -> shard-count bug;
+    if healthy -> the bug is cross-node. NOT for production.
+    """
+    cfg = rl_grpo_lora_qwen3_0_6b()
+    from dataclasses import replace
+
+    cfg.trainer.parallelism = replace(
+        cfg.trainer.parallelism, data_parallel_shard_degree=8
+    )
+    cfg.generator.parallelism = replace(
+        cfg.generator.parallelism, data_parallel_degree=4
+    )
+    # Short smoke run; a healthy vs exploded logprob_diff shows within ~3 steps.
+    cfg.async_loop.num_training_steps = 10
+    return cfg
+
+
+def rl_grpo_lora_qwen3_0_6b_varlen() -> Controller.Config:
+    """GRPO + LoRA config for Qwen3-0.6B with VARLEN (non-flex) attention.
+
+    Identical to rl_grpo_lora_qwen3_0_6b but attn_backend='varlen'. The flex
+    variant miscompiles when the trainer FSDP mesh spans >1 node (flex_attention
+    validate_subgraph_args_types Proxy assertion during recompile), corrupting
+    the recomputed logprobs -> exploding loss. varlen_attn is not torch.compiled
+    and avoids that path; use this for multi-node (>1 trainer node) runs.
+    """
+    group_size = 8
+    model_spec = _qwen3_rl_model_registry(
+        "0.6B",
+        attn_backend="varlen",
+        converters=[
+            LoRAConverter.Config(rank=32, alpha=64.0, target_modules=["wqkv", "wo"]),
+        ],
     )
     return Controller.Config(
         model_spec=model_spec,
