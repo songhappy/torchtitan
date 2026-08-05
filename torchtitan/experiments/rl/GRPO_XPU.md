@@ -545,6 +545,9 @@ Both multi-node scripts carry a `#PBS -l select=8` header; a `-l select=N` on th
 
 ### Multiple nodes, LoRA
 
+Note: new code change in https://github.com/songhappy/torchstore/tree/rl
+and https://github.com/songhappy/torchtitan/tree/rl to make multiple node run and full GRPO
+
 `run_grpo_lora_multinode.sh`, plus `run_grpo_lora_2n.sh` as a thin `select=2`
 wrapper around it. This is the validated arm: 200/200 steps at 8 nodes,
 25.4 s/step, reward 0.222 -> 0.355.
