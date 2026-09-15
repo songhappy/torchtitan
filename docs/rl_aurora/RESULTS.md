@@ -8,8 +8,9 @@ never by the job total.
 Two documents, one file: **Part 1** is the measured results, **Part 2** is every
 fix that got there, one by one.
 
-Covers the exp1-exp9 parallelism sweep (20-step runs) and the 200-step LoRA and
-full-parameter runs of 2026-08-05. Headline: **LoRA completes 200 steps and
+Covers the exp1-exp9 parallelism sweep (20-step runs), the 200-step LoRA and
+full-parameter runs of 2026-08-05, and the exp11 1-node LoRA baseline of
+2026-09-14. Headline: **LoRA completes 200 steps and
 learns; the full-parameter arm still hangs in the weight pull**, now at step 120
 instead of step 3 -- see [The 200-step runs](#the-200-step-runs-8-nodes-2026-08-05)
 and the verdict under Fix 11.
@@ -17,6 +18,12 @@ and the verdict under Fix 11.
 Source logs are archived outside the repo at `~/aurora_rl_logs/` (see
 [Log archive](#log-archive)). Numbers were extracted mechanically by
 `torchtitan/experiments/rl/extract_exp_metrics.py`, not copied by hand.
+
+**exp11 (1-node LoRA, added 2026-09-14)** is a later addition, not part of the
+07-31/08-01 sweep. Its rows are marked in every table below. Its aggregates were
+computed by the same conventions but by a separate parser, and its `s/step` is
+reconstructed from wall clock rather than read from the log -- see the note under
+[Trainer throughput](#trainer-throughput).
 
 ---
 
@@ -26,7 +33,9 @@ Source logs are archived outside the repo at `~/aurora_rl_logs/` (see
 
 Identical across exp1-exp8 (`rl_grpo_lora_qwen3_0_6b`); exp9 is the
 full-parameter twin (`rl_grpo_full_qwen3_0_6b_flex`) and differs **only** in
-dropping the LoRA converter.
+dropping the LoRA converter. exp11 runs the same LoRA config at one node and
+differs **only** in `gpu_memory_limit=0.90`, which `run_grpo_lora_sn.sh:92`
+hardcodes.
 
 | knob | value |
 |---|---|
@@ -37,18 +46,19 @@ dropping the LoRA converter.
 | optimizer | AdamW, lr 2e-6, 5 warmup steps, linear decay |
 | loss | GRPO, `max_offpolicy_steps=3` (async, 3-step-lagged rollout buffer) |
 | sampling | temperature 1.0, top_p 0.95, `max_tokens=512` |
-| generator | vLLM, `gpu_memory_limit=0.85`, cudagraph off, `dp=<gen tiles>`, `tp=1` |
+| generator | vLLM, `gpu_memory_limit=0.85` (**0.90 in exp11**), cudagraph off, `dp=<gen tiles>`, `tp=1` |
 | compile | `aot_eager` |
 | steps requested | 10 |
 | validation | 20 samples |
 
 Node split is done by `multinode_launcher.py`: half the nodes trainer, half
 generator. So a 2-node job is 4 trainer tiles + 4 generator tiles, and a 4-node
-job is 8 + 8. The trainer mesh axes are what the experiments vary.
+job is 8 + 8. At one node the split is within the node: 2 + 2 (exp9', exp11).
+The trainer mesh axes are what the experiments vary.
 
 ## Configurations and outcomes
 
-| exp | nodes | trainer mesh (4 or 8 tiles) | gen mesh | steps | job | outcome |
+| exp | nodes | trainer mesh (2, 4 or 8 tiles) | gen mesh | steps | job | outcome |
 |---|---|---|---|---|---|---|
 | exp1 | 2 | `dp_replicate=2 x dp_shard=2` | `dp=4` | 10/10 | 8723859 | **pre-`--cpu-bind none`, NOT comparable** |
 | exp2 | 2 | `dp_replicate=2 x tp=2` | `dp=4` | 10/10 | 8724090 | **pre-`--cpu-bind none`, NOT comparable** |
@@ -62,6 +72,18 @@ job is 8 + 8. The trainer mesh axes are what the experiments vary.
 | exp9' | 1 | `dp_shard=2`, full-parameter | `dp=2` | 2/2 | 8731367 | **clean with the RMSNorm fix preloaded** |
 | exp10 | 8 | `dp_replicate=4 x dp_shard=4`, full-parameter | `dp=16` | **3/200** | 8731512 | 3 healthy steps, then hung in the weight pull -- see Fix 11 |
 | exp10' | 8 | same, 150 steps, with Fix 11 | `dp=16` | pending | 8734008 | submitted on `capacity` 2026-08-04 |
+| exp11 | 1 | `dp_shard=2` | `dp=2` | 10/10 | interactive | healthy, **1-node LoRA baseline** (2026-09-14) |
+
+exp11 is the 1-node LoRA baseline the sweep never had: exp1-exp8 start at 2 nodes
+and exp9'/exp10 are full-parameter, so nothing here measured LoRA at 2+2 tiles. It
+ran interactively via `run_grpo_lora_sn.sh` on a held allocation, so it has no PBS
+job ID; its log is `torchtitan/experiments/rl/train_lora_1n.log` (23:01:36 to
+23:08:28, 6m52s). It is clean: 10/10 steps, both validations, zero `RuntimeError`,
+zero `ValueError`, zero `died from signal`, and the controller reached `Closing:
+tearing down actors`. The 148 tracebacks in its log are all the inductor
+FX-graph-cache fault (74 failed cache loads plus 74 `CompiledFxGraph.__del__`
+`AttributeError`s, a 1:1 pairing), which is warning-level and non-fatal -- it costs
+a full recompile of step 1, nothing else.
 
 exp1 and exp2 ran at 21:03 and 22:11 on 07-31; `--cpu-bind none` landed in the
 launch scripts at 22:44 that night. Their own `.pbs` bodies confirm it: exp1/exp2
@@ -100,10 +122,42 @@ magnitude slower, so every figure is over steps 2..N.
 | exp7 | **21734** | 2717 | 2587 | 323 | 21.6 | 15335-26536 |
 | exp8 | 8412 | 1051 | 2388 | 299 | 21.8 | 8031-9003 |
 | exp9' | 8099 | 4049 | 8097 | 4049 | n/a | single step |
+| exp11 | 8928 | **4464** | 2553 | **1276** | 16.3 | 8419-10219 |
 
 Units: tokens/s; `s/step` is wall clock over steps 2..N. exp6's full_step equals
 its fwd_bwd, and its s/step is short, only because it never reached a
 generator-blocked step before stalling.
+
+**exp11 has the highest per-GPU fwd_bwd of any LoRA run, 4464, and the tightest
+spread, 8419-10219 (+/-10% over nine steps).** Per-GPU fwd_bwd now falls
+monotonically with scale across the whole LoRA range: 4464 (2 tiles) -> 3459 (4,
+exp3) -> 2642 (8, exp5). Two trainer tiles is the most efficient point measured,
+and the 76% marginal efficiency quoted below for 2->4 nodes is the tail of a curve
+that was already declining.
+
+**exp11 sits at 16.3 s/step, below the 20.2-21.8 s band, and that is a measurement
+artifact rather than a faster run.** `s/step` is `tokens_per_step / full_step`, and
+tokens/step is *not* constant across runs: exp11 measures **41,700** (652 tok/seq x
+64 sequences, reconstructed from wall clock -- the reconstruction lands step 10's
+end at 23:07:22.75 against the log's last training timestamp of 23:07:22,694, a
+56 ms match), whereas exp5's own two columns imply 2629 x 21.6 = **56,786**.
+`full_step` is the reproducible quantity; `s/step` inherits whatever the rollout
+token count happened to be. Read the band as "no mesh in the sweep changed the step
+time", not as a constant of the workload.
+
+One caveat on exp11's reconstruction: its config saves a checkpoint, and the
+`Saving a full checkpoint at last step, step 10` at 23:07:19,632 runs for ~2.4 s
+*inside* the calibration span, so 41,700 and 16.3 are each about 1% high (41,300
+and 16.2 without it). The full-parameter twin has no such term --
+`rl_grpo_full_qwen3_0_6b_flex` sets `checkpoint.load_only=True` and never saves.
+That asymmetry is worth knowing before treating the two 1-node arms as a fully
+controlled pair.
+
+exp11's step budget: **step 1 costs 103.8 s, 41% of the 250.8 s run**, all of it
+`torch.compile` (the inductor cache cannot be reused; see the exp11 note above).
+Steps 2..10 are bimodal 7:2 -- seven steps at 4.6 s mean with the batch ready, two
+(steps 5 and 8) at 31.0 s mean blocked on generation. That 7:2 ratio is better than
+the 5:4 seen at larger scale, i.e. two trainer tiles are the easiest to keep fed.
 
 **The `s/step` column is the punchline: 20.2-21.8 s in every unpinned 10-step run,
 regardless of mesh.** exp3 computes 2.6x faster than exp4 and finishes a step 1.3 s
@@ -147,6 +201,7 @@ the concurrency the engine actually held (`inflight_requests_at_completion`).
 | exp7 | 52.7 | 19.0 | 235 | 4467 | 558 | 23.0 | 9.2 |
 | exp8 | 53.8 | 18.6 | 236 | 4399 | 550 | 23.0 | 3.4 |
 | exp9' | 44.2 | 22.6 | 254 | 5763 | **2881** | 18.4 | 42.6 |
+| exp11 | 51.2 | 19.5 | 239 | **4668** | **2334** | 22.1 | 50.5 |
 
 **Generation does not scale with generator tiles at all.** 4 gen tiles deliver
 4575 tok/s; 8 gen tiles deliver 4469. Doubling the generator halved per-GPU
@@ -155,6 +210,20 @@ same table: `inflight` is pinned at 235-240 in every run regardless of tile
 count, so the *controller* is supplying a fixed amount of concurrent work
 (64 sequences/step x the 3-step off-policy buffer + validation), and 4 tiles
 already absorb it. The generator half of a 4-node job is idle capacity.
+
+**exp11 extends this downward and makes it stronger: 2 gen tiles deliver 4668
+tok/s, more than the 4-tile 4575 and the 8-tile 4469.** Aggregate throughput is
+*highest at the smallest generator measured*, and per gen-GPU collapses
+monotonically 2334 (2 tiles) -> 1144 (4) -> 559 (8). exp11's `inflight` of 239 is
+inside the same 235-254 band as every other run. So the correct statement is not
+"4 tiles already absorb the work" but **2 tiles already absorb it, and every tile
+past that is pure idle capacity.** Its ITL of 51.2 ms is squarely in the healthy
+50-56 ms band.
+
+exp11's `queue` of 50.5 ms is not a steady-state figure: it is 78.7 -> 153.6 ->
+191.7 ms at steps 2-4 and then ~1.5 ms from step 6 on. That is the pre-filled
+off-policy buffer draining faster than it refills; once drained the trainer waits
+instead of the requests waiting. The same shape appears in exp9' (42.6 ms mean).
 
 This is the single largest finding in the sweep and it is a **workload** limit,
 not a hardware or fabric one: raise `num_groups_per_train_step`,
@@ -180,10 +249,12 @@ across meshes", not as learning curves.
 | exp7 | 0.38 -> 0.22 (0.228) | -0.0075 | 0.056-0.140 | 0.55 -> 0.46 | 0.87 |
 | exp8 | 0.27 -> 0.20 (0.244) | -0.0092 | 0.056-0.120 | 0.56 -> 0.49 | 1.07 |
 | exp9' | 0.34 -> 0.26 (0.300) | -0.0080 | **0.290-0.430** | 0.56 -> 0.53 | 1.11 |
+| exp11 | 0.38 -> 0.19 (0.246) | -0.0057 | 0.065-0.110 | 0.56 -> 0.46 | 0.80 |
 
 **Every LoRA run sits in grad_norm 0.056-0.150.** That band is the acceptance
 test for this stack: exp8 was at **88-2464** before Fix 4 and is at 0.056-0.120
-after, with no code change. Reward drifting down over 10 steps at lr 2e-6 with
+after, with no code change. exp11 at 0.065-0.110 holds the band at 2 tiles, so it
+is not a property of the 4- and 8-tile meshes. Reward drifting down over 10 steps at lr 2e-6 with
 entropy also falling is sampling noise on a 64-sequence batch, and it happens
 identically in all eight -- it is not a mesh-dependent signal.
 
@@ -191,6 +262,52 @@ exp9' is the one legitimate outlier: grad_norm **0.29-0.43**, 3-5x the LoRA band
 Expected, not a bug -- it trains all 0.6B parameters instead of rank-32 adapters,
 so the gradient norm is over a far larger parameter vector. Loss and reward are
 in family with the LoRA runs.
+
+## Validation reward and generator memory (exp11)
+
+No table above has a column for either, because the sweep never recorded them.
+exp11 does, and both are worth carrying forward.
+
+**Validation reward, 20 samples, pre / post 10 steps: 0.251 -> 0.512** (`_std`
+0.255 -> 0.387, `_sum` 5.028 -> 10.250). This is the first positive pre/post delta
+recorded on this stack. It is not evidence of convergence at 10 steps -- it is
+evidence that the validation path works and that the reward signal moves in the
+right direction, which the `rollout_reward` column (0.38 -> 0.19, drifting *down*
+on sampling noise) cannot show.
+
+Generator memory, one FLAT tile = 63.98 GiB:
+
+| | exp11 (LoRA 1n) |
+|---|---|
+| `gpu_memory_limit` | 0.90 (`run_grpo_lora_sn.sh:92`) |
+| vLLM budget | 57.58 GiB |
+| model weights | 2.22 GiB |
+| KV cache | 53.37 GiB / 499,456 tokens |
+| non-KV overhead (budget - weights - KV) | 1.99 GiB |
+| tile headroom left | 6.40 GiB |
+| max concurrency @ 40,960 tok/req | 12.19x |
+
+**Non-KV overhead is ~2.0 GiB at 2 visible tiles, independent of the memory limit
+and of LoRA-vs-full**: exp11 at 0.90 gives 1.99 GiB and the 1-node full run at 0.85
+gives 2.00 GiB. At 4 visible tiles it is 2.46 GiB, i.e. **~0.23 GiB per additional
+visible tile.** That is an order of magnitude below the ~1.3 GiB/tile that a
+per-visible-tile Level Zero context would need to account for the idle-tile
+occupancy seen elsewhere, so that explanation is not supported.
+
+**The KV cache is heavily oversubscribed and `gpu_memory_limit=0.90` buys nothing.**
+vLLM's own `loggers.py:273` line reports a peak `GPU KV cache usage` of **11.8%**
+across the run (58,935 of 499,456 tokens; p90 9.0%, mean 3.4%) even at the moment
+`Running` hits the full `max_num_seqs=128`, while leaving only 6.40 GiB of tile
+headroom -- the tightest of any run measured, for a cache it uses an eighth of.
+
+The 12.19x concurrency figure above is *not* the binding limit and should not be
+read as one: vLLM computes it against `max_seq_len=40960`, which comes from
+Qwen3-0.6B's `max_position_embeddings`, not from anything this workload sets. Real
+requests are at most `seq_len=2048` prompt + `max_tokens=512` completion, so the
+same cache holds hundreds of them. A 4-node LoRA run at 0.80 reproduced exp5's throughput
+to within 3%, so lowering `run_grpo_lora_sn.sh:92` to 0.80 would triple the headroom
+at no measurable cost and remove the vLLM `request_memory()` startup-guard failure
+as a class of job death.
 
 ## The three runs that did not finish
 
@@ -791,6 +908,10 @@ The raw training logs were moved out of `torchtitan/experiments/rl/` to
 
 - `train_exp{1..8}_*.log.gz`, `train_exp9_2n_dpshard4_full.log.gz`,
   `exp9_1n_interposed.log.gz` -- the ten runs tabulated above
+- **exp11 is not archived yet**: its log is still live at
+  `torchtitan/experiments/rl/train_lora_1n.log`, and `run_grpo_lora_sn.sh` will
+  overwrite it on the next 1-node LoRA run. Move it to the archive before
+  re-running that script.
 - `*.VERDICT.txt` -- the per-job verdicts, which carry job IDs, the `Mesh split`
   line, and the fault/step counts that provenance the numbers here
 

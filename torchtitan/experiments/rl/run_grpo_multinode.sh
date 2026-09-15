@@ -122,11 +122,6 @@ DP_REPLICATE=${DP_REPLICATE:-1}
 # initial HF weight load, so no-enable silently trains from random init and the
 # first step never completes. Word-split on purpose so several flags can be passed.
 EXTRA_ARGS=${EXTRA_ARGS:-}
-# The live log name defaults to per-node-count, which COLLIDES when two full-param
-# runs of the same size overlap (e.g. a 10-step smoke test and a 200-step run):
-# the second truncates the first, and the watcher archives whichever it happens to
-# read. Override it per run to keep them apart.
-LOG=${LOG:-torchtitan/experiments/rl/train_full_${NUM_NODES}n.log}
 
 # A stale checkpoint from a different mesh shape fails to load, so start clean.
 rm -rf ~/git/torchtitan/"$DUMP_FOLDER"/checkpoint/ 2>/dev/null
@@ -148,6 +143,13 @@ if [ "$NUM_NODES" -gt "$AVAILABLE_NODES" ]; then
     exit 1
 fi
 ALL_NODES=$(IFS=,; echo "${NODE_LIST[*]:0:$NUM_NODES}")
+# MUST come after NUM_NODES is resolved above: assigned any earlier, ${NUM_NODES}
+# expands to nothing under qsub (which forwards no env unless -v names it) and
+# every run at every node count writes the SAME train_full_n.log, silently
+# truncating the previous run's evidence. Even correctly named, the per-node-count
+# default still collides when two full-param runs of the same size overlap (e.g. a
+# 10-step smoke test and a 200-step run), so override LOG per run to keep them apart.
+LOG=${LOG:-torchtitan/experiments/rl/train_full_${NUM_NODES}n.log}
 
 echo "=== Multi-node full GRPO: ${NUM_NODES}/${AVAILABLE_NODES} nodes, ${PPN} GPUs/node ==="
 echo "Nodes:      ${ALL_NODES}"
