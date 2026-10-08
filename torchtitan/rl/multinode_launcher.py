@@ -139,6 +139,105 @@ def _spawn_generator_meshes(
     return meshes
 
 
+def _find_lora_rank(obj, depth: int = 0) -> int | None:
+    """Detect the LoRA rank in a model config tree, or None if there is none.
+
+    After LoRA conversion, target Linear configs become LoRALinear.Config, which
+    is recognized here by carrying both `rank` and `alpha`.
+    """
+    if depth > 5:
+        return None
+    if hasattr(obj, "rank") and hasattr(obj, "alpha"):
+        return obj.rank
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            r = _find_lora_rank(item, depth + 1)
+            if r is not None:
+                return r
+    elif hasattr(obj, "__dataclass_fields__"):
+        for field_name in obj.__dataclass_fields__:
+            r = _find_lora_rank(getattr(obj, field_name), depth + 1)
+            if r is not None:
+                return r
+    return None
+
+
+def _derive_dp_degrees(
+    trainer_total_gpus: int,
+    *,
+    gpus_per_node: int,
+    tp: int,
+    pp: int,
+    cp: int,
+    dp_replicate: int,
+    lora_rank: int | None,
+) -> tuple[int, int]:
+    """Derive the data-parallel degrees that fill ``trainer_total_gpus``.
+
+    dp_shard takes whatever the other degrees leave, then is capped and the
+    excess spills onto dp_replicate. Two separate things bound dp_shard; the
+    smaller one wins.
+
+    1. LOCALITY, both arms. dp_shard all-gathers parameters every layer while
+       dp_replicate all-reduces gradients once per step, so the shard group is
+       the one that must stay inside a node (measured: dp_shard4 x rep2 beat the
+       folded dp_shard8 at 7163 vs 6529 tok/s, see ``run_controller``). Mesh axis
+       order is ("pp", "dp_replicate", "dp_shard", "cp", "tp"), so a shard group
+       is rank-contiguous and lands inside a node exactly when
+       ``dp_shard * cp * tp <= gpus_per_node``. This binds for LoRA too: the
+       frozen base weights are still sharded (nothing passes ignored_params to
+       fully_shard), so the per-layer all-gather moves the whole base model
+       whether or not adapters are the only trainable params. LoRA only makes the
+       dp_replicate side cheaper, since the gradient all-reduce then carries
+       adapters alone.
+    2. ZERO-SIZED SHARDS, LoRA only. FSDP shards each param on dim 0 and the
+       smallest LoRA tensor dim is the rank, so dp_shard past the rank produces
+       zero-sized shards, which TorchStore cannot handle. A correctness bound, so
+       it can only lower the cap, never raise it. No full-parameter tensor is
+       anywhere near that small (smallest dim 0 in Qwen3-0.6B is 1024).
+
+    Args:
+        trainer_total_gpus: GPUs available to the trainer role.
+        gpus_per_node: GPUs per node, which sets the locality cap.
+        tp: Tensor-parallel degree.
+        pp: Pipeline-parallel degree.
+        cp: Context-parallel degree.
+        dp_replicate: Requested replicate degree; the cap multiplies into it.
+        lora_rank: LoRA rank, or None for a full-parameter model.
+
+    Returns:
+        The (dp_replicate, dp_shard) pair to train with.
+
+    Raises:
+        ValueError: If the degrees cannot cover every trainer GPU.
+    """
+    dp_shard = trainer_total_gpus // (tp * pp * cp * dp_replicate)
+    max_dp_shard = max(gpus_per_node // (cp * tp), 1)
+    if lora_rank:
+        max_dp_shard = min(max_dp_shard, lora_rank)
+
+    if dp_shard > max_dp_shard:
+        # Multiply into dp_replicate rather than overwriting it: an explicit
+        # dp_replicate is already divided out of dp_shard above, so assigning
+        # here would discard it and leave a mesh covering part of the allocation.
+        dp_replicate *= dp_shard // max_dp_shard
+        dp_shard = max_dp_shard
+        logger.info(f"Capping dp_shard at {dp_shard}, dp_replicate={dp_replicate}")
+
+    # A mesh that does not cover every trainer GPU fails silently: the proc mesh
+    # is sized from the resulting world size, so the run would train on part of
+    # the allocation with nothing in the log saying so.
+    derived_world_size = dp_replicate * dp_shard * cp * tp * pp
+    if derived_world_size != trainer_total_gpus:
+        raise ValueError(
+            f"derived trainer mesh covers {derived_world_size} of "
+            f"{trainer_total_gpus} trainer GPUs (dp_replicate={dp_replicate}, "
+            f"dp_shard={dp_shard}, cp={cp}, tp={tp}, pp={pp}); pick degrees that "
+            f"divide {gpus_per_node} GPUs per node evenly"
+        )
+    return dp_replicate, dp_shard
+
+
 def run_worker(address: str) -> None:
     """Start Monarch worker loop (blocks forever)."""
     from monarch.actor import run_worker_loop_forever
@@ -223,47 +322,19 @@ async def run_controller(
     generator_host_mesh = host_mesh.slice(hosts=slice(num_trainer_nodes, num_nodes))
 
     # Scale parallelism to fill allocated GPUs.
-    # Cap dp_shard at the LoRA rank (if LoRA is used) to avoid zero-sized FSDP
-    # shards that TorchStore cannot handle. Excess GPUs go to dp_replicate.
     trainer_total_gpus = num_trainer_nodes * gpus_per_node
     tp = config.trainer.parallelism.tensor_parallel_degree
     pp = config.trainer.parallelism.pipeline_parallel_degree
     cp = config.trainer.parallelism.context_parallel_degree
-    dp_replicate = config.trainer.parallelism.data_parallel_replicate_degree
-    trainer_dp_shard = trainer_total_gpus // (tp * pp * cp * dp_replicate)
-
-    # Detect LoRA rank from the model config tree. After LoRA conversion,
-    # target Linear configs become LoRALinear.Config with `rank` + `alpha`.
-    def _find_lora_rank(obj, depth=0):
-        if depth > 5:
-            return None
-        if hasattr(obj, "rank") and hasattr(obj, "alpha"):
-            return obj.rank
-        if isinstance(obj, (list, tuple)):
-            for item in obj:
-                r = _find_lora_rank(item, depth + 1)
-                if r is not None:
-                    return r
-        elif hasattr(obj, "__dataclass_fields__"):
-            for field_name in obj.__dataclass_fields__:
-                r = _find_lora_rank(getattr(obj, field_name), depth + 1)
-                if r is not None:
-                    return r
-        return None
-
-    # FSDP shards each param on dim 0, and the smallest LoRA tensor dim is the
-    # LoRA rank, so dp_shard can grow up to the rank without producing zero-sized
-    # shards (which TorchStore cannot handle). Cap at the rank -- NOT a hardcoded
-    # 4 -- so all trainer GPUs go to dp_shard (dp_replicate stays 1) whenever the
-    # rank allows; only spill to dp_replicate past that.
-    lora_rank = _find_lora_rank(config.model)
-    max_dp_shard = lora_rank or 4
-    if trainer_dp_shard > max_dp_shard:
-        dp_replicate = trainer_dp_shard // max_dp_shard
-        trainer_dp_shard = max_dp_shard
-        logger.info(
-            f"Capping dp_shard at {max_dp_shard}, " f"dp_replicate={dp_replicate}"
-        )
+    dp_replicate, trainer_dp_shard = _derive_dp_degrees(
+        trainer_total_gpus,
+        gpus_per_node=gpus_per_node,
+        tp=tp,
+        pp=pp,
+        cp=cp,
+        dp_replicate=config.trainer.parallelism.data_parallel_replicate_degree,
+        lora_rank=_find_lora_rank(config.model),
+    )
 
     # The requested dp_replicate x dp_shard split is used as-is, including when a
     # replicate group spans physical nodes.
