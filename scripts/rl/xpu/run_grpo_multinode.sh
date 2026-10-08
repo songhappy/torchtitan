@@ -38,7 +38,39 @@ source ${ONEAPI_ENV_SCRIPT:-$TORCHTITAN_DIR/scripts/rl/xpu/env_torch214.sh}
 eval "$(${CONDA_PREFIX_BASE:-$HOME/miniforge3}/bin/conda shell.bash hook)"
 conda activate ${CONDA_ENV:-monarch214}
 
-export ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0,1,2,3}
+# PPN (tiles per node) is resolved here, before the device mask, because the mask
+# is derived from it. An Aurora node has 12 XPU tiles under
+# ZE_FLAT_DEVICE_HIERARCHY=FLAT (set by env_torch214.sh), so 1..12 is the whole
+# supported range; a larger value would otherwise fail deep inside Level Zero
+# with no hint of the cause.
+#
+# Within 1..12, the model's parameter shapes constrain dp_shard, which
+# _derive_dp_degrees sets to PPN so a shard group stays inside one node. FSDP2
+# pads uneven shards on dim 0 but RAISES on any later dim, and a stacked
+# projection's dim 0 is the stack count, so a dp_shard above that count shards
+# dim 1 and must divide it exactly. Qwen3-0.6B has feed_forward.w13 of shape
+# (2, 3072, 1024), so PPN 1-4, 6, 8 and 12 work while 5, 7, 9, 10 and 11 die in
+# fully_shard with "FSDP does not support uneven sharding on dim 1 ...
+# (world size: PPN)".
+#
+# That is a cost of the locality cap, not a property of the hardware: the
+# previous hardcoded cap of 4 was FSDP-safe at every PPN because 4 divides 3072.
+# The way out is DP_REPLICATE, which divides dp_shard back down: PPN=10 with
+# DP_REPLICATE=5 gives dp_shard=8 on 8 nodes (3072/8=384) and still covers every
+# tile. All of PPN 1, 2, 4, 6, 8, 10 (with DP_REPLICATE=5) and 12 verified on
+# hardware 2026-10-08.
+PPN=${PPN:-4}
+if [ "$PPN" -lt 1 ] || [ "$PPN" -gt 12 ]; then
+    echo "ERROR: PPN=$PPN is outside 1..12; an Aurora node has 12 XPU tiles under"
+    echo "       ZE_FLAT_DEVICE_HIERARCHY=FLAT."
+    exit 1
+fi
+# One rank per tile, so expose exactly the tiles this run uses. Monarch hands
+# each spawned proc mesh an absolute tile id of its own, so this value is what
+# the launcher process itself (and the RMSNorm precheck below) sees. It was
+# hardcoded to 0,1,2,3 until 2026-10-08, which silently disagreed with any PPN
+# other than 4.
+export ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-$(seq -s, 0 $((PPN - 1)))}
 # Cray libfabric supplies the CXI provider oneCCL needs. Aurora system
 # refreshes rotate the version directory (1.22.0 disappeared in the 2026-09
 # refresh), so resolve the newest one instead of pinning a version -- a stale
@@ -112,15 +144,17 @@ export MONARCH_ACTOR_QUEUE_DISPATCH=${MONARCH_ACTOR_QUEUE_DISPATCH:-1}
 # 65536-row weight-grad backward that needed it on 2.12 (intel/torch-xpu-ops#4790).
 
 HF_ASSETS_PATH=${HF_ASSETS_PATH:-/flare/Aurora_deployment/intel/models/Qwen3-0.6B}
-PPN=${PPN:-4}
+# PPN is resolved and range-checked at the top, next to the device mask it feeds.
 NUM_STEPS=${NUM_STEPS:-10}
 VAL_SAMPLES=${VAL_SAMPLES:-0}
 CONFIG=${CONFIG:-rl_grpo_full_qwen3_0_6b_flex}
 DUMP_FOLDER=${DUMP_FOLDER:-outputs/rl_full_multinode}
 # Nodes split half trainer / half generator by multinode_launcher. Trainer
-# dp_shard = trainer_gpus/(TP*DP_REPLICATE), capped at 4 without LoRA, with the
-# excess spilling onto dp_replicate. Keep TP inside a node: cross-node TP is
-# correct but ~10x slower.
+# dp_shard = trainer_gpus/(TP*DP_REPLICATE), capped without LoRA at one node's
+# worth of tiles (PPN/(CP*TP)) so a shard group's per-layer all-gather stays
+# on-node, with the excess spilling onto dp_replicate. At PPN=4 that is
+# dp_shard=4 x dp_replicate=nodes/2; at PPN=8, dp_shard=8. Keep TP inside a
+# node: cross-node TP is correct but ~10x slower.
 TP=${TP:-1}
 DP_REPLICATE=${DP_REPLICATE:-1}
 # qsub takes no trailing script arguments (unlike sbatch), so "$@" is always
@@ -170,6 +204,10 @@ LOG=${LOG:-$DUMP_FOLDER/train_full_${NUM_NODES}n.log}
 echo "=== Multi-node full GRPO: ${NUM_NODES}/${AVAILABLE_NODES} nodes, ${PPN} GPUs/node ==="
 echo "Nodes:      ${ALL_NODES}"
 echo "Config:     ${CONFIG}  TP=${TP}  DP_REPLICATE=${DP_REPLICATE}"
+echo "Tiles:      ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK}"
+# Visible on purpose: an uncapped pool here is what exhausts the job cgroup's
+# per-node task limit (pids.max=8192) and kills or hangs a high-PPN run.
+echo "Threads:    OMP=${OMP_NUM_THREADS} OPENBLAS=${OPENBLAS_NUM_THREADS} TOKIO=${TOKIO_WORKER_THREADS}"
 
 cd "$TORCHTITAN_DIR" || { echo "ERROR: TORCHTITAN_DIR=$TORCHTITAN_DIR not found"; exit 1; }
 mkdir -p "$DUMP_FOLDER"

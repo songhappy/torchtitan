@@ -43,7 +43,22 @@ conda activate ${CONDA_ENV:-monarch214}
 # all of them. The FI_CXI_*/CCL_* tuning is what makes cross-node runs both
 # correct and alive: without it tp=8 dies on `atl_ofi.cpp:1071 fi_cq_readerr
 # err 5` and tp4/rep2 trains with grad_norm 88-2464 vs a healthy 0.05-0.15.
-export ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0,1,2,3}
+# PPN (tiles per node) is resolved here, before the device mask, because the mask
+# is derived from it. An Aurora node has 12 XPU tiles under
+# ZE_FLAT_DEVICE_HIERARCHY=FLAT (set by env_torch214.sh), so 1..12 is the whole
+# supported range; a larger value would otherwise fail deep inside Level Zero
+# with no hint of the cause.
+PPN=${PPN:-4}
+if [ "$PPN" -lt 1 ] || [ "$PPN" -gt 12 ]; then
+    echo "ERROR: PPN=$PPN is outside 1..12; an Aurora node has 12 XPU tiles under"
+    echo "       ZE_FLAT_DEVICE_HIERARCHY=FLAT."
+    exit 1
+fi
+# One rank per tile, so expose exactly the tiles this run uses. Monarch hands
+# each spawned proc mesh an absolute tile id of its own, so this value is what
+# the launcher process itself sees. It was hardcoded to 0,1,2,3 until 2026-10-08,
+# which silently disagreed with any PPN other than 4.
+export ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-$(seq -s, 0 $((PPN - 1)))}
 # Cray libfabric supplies the CXI provider oneCCL needs. Aurora system
 # refreshes rotate the version directory (1.22.0 disappeared in the 2026-09
 # refresh), so resolve the newest one instead of pinning a version -- a stale
@@ -117,14 +132,20 @@ HF_ASSETS_PATH=${HF_ASSETS_PATH:-/flare/Aurora_deployment/intel/models/Qwen3-0.6
 CONFIG=${CONFIG:-rl_grpo_lora_qwen3_0_6b}
 NUM_STEPS=${NUM_STEPS:-150}
 VAL_SAMPLES=${VAL_SAMPLES:-0}
-PPN=${PPN:-4}
+# PPN is resolved and range-checked at the top, next to the device mask it feeds.
 DUMP_FOLDER=${DUMP_FOLDER:-outputs/rl_lora_multinode}
 # multinode_launcher splits the nodes half trainer / half generator, so
-# dp_shard = (NUM_NODES/2 * PPN) / (TP * DP_REPLICATE), capped at the LoRA rank
-# with the excess spilling onto dp_replicate. TP=1/DP_REPLICATE=1 (pure dp_shard)
-# is the fastest measured shape at every node count tried: at 2 nodes 13-17k
-# tok/s vs 8-10k for TP=2 x rep2 and 5.0-5.8k for TP=4. Keep TP inside a node --
-# cross-node TP is correct but ~10x slower (tp=8 measured ~500 tok/s).
+# dp_shard = (NUM_NODES/2 * PPN) / (TP * DP_REPLICATE), capped at the smaller of
+# one node's worth of tiles (PPN/(CP*TP)) and the LoRA rank, with the excess
+# spilling onto dp_replicate. The locality half of that cap landed 2026-10-08
+# and CHANGED this arm: 8 nodes at PPN=4 was dp_shard=16 x rep=1 (a shard group
+# spanning all 4 trainer nodes) and is now dp_shard=4 x rep=4, so throughput and
+# weight-transfer counts are not comparable to runs before that date.
+# TP=1/DP_REPLICATE=1 is the fastest measured shape at every node count tried:
+# at 2 nodes 13-17k tok/s vs 8-10k for TP=2 x rep2 and 5.0-5.8k for TP=4 -- but
+# note that at 2 nodes the trainer is a single node, so that sweep never
+# measured a cross-node shard group. Keep TP inside a node -- cross-node TP is
+# correct but ~10x slower (tp=8 measured ~500 tok/s).
 TP=${TP:-1}
 DP_REPLICATE=${DP_REPLICATE:-1}
 # qsub takes no trailing script arguments (unlike sbatch), so "$@" is always
@@ -176,6 +197,10 @@ echo "=== GRPO+LoRA: ${NUM_NODES}/${AVAILABLE_NODES} nodes x ${PPN} GPUs, ${CONF
      "TP=${TP} DP_REPLICATE=${DP_REPLICATE}, ${NUM_STEPS} steps ==="
 echo "Nodes: ${ALL_NODES}"
 echo "Log:   ${LOG}"
+echo "Tiles: ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK}"
+# Visible on purpose: an uncapped pool here is what exhausts the job cgroup's
+# per-node task limit (pids.max=8192) and kills or hangs a high-PPN run.
+echo "Threads: OMP=${OMP_NUM_THREADS} OPENBLAS=${OPENBLAS_NUM_THREADS} TOKIO=${TOKIO_WORKER_THREADS}"
 
 # --cpu-bind none is REQUIRED. PALS binds each rank to its own core slice, and at
 # -ppn 1 that slice is a SINGLE core; every Monarch actor and vLLM worker forked

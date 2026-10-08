@@ -18,3 +18,31 @@ fi
 # processes OOM each other and sampled outputs are not run-to-run reproducible.
 export ZE_FLAT_DEVICE_HIERARCHY=FLAT
 unset ZE_ENABLE_API_TRACING ZE_ENABLE_PCI_ID_DEVICE_ORDER
+
+# Per-process thread pools, capped because the PBS job cgroup caps TASKS per
+# node: /sys/fs/cgroup/jobs/<jobid>/pids.max is 8192 on Aurora, counting
+# processes and threads alike, and clone() past it returns EAGAIN.
+#
+# Three pools size themselves to the core count and so cost ~440 threads per
+# process on a 208-thread node (measured: OMP + OpenBLAS 115 and
+# monarch-pytokio 104 on a 104-thread node, 413 observed on hardware). An RL
+# node runs 2 procs per tile for the trainer role alone (trainer + its
+# TorchStore storage volume) plus the generators' procs, so the node total is
+# roughly 440 * 2 * tiles: fine at 4 tiles, and at 8 tiles it measured 8189 of
+# 8192. That ceiling is how job 8914411 died -- 8-node PPN=8 hit EAGAIN in
+# OpenBLAS init and then SIGSEGV -- and how its 2-node twin (8914526) hung
+# outright with no error at all.
+#
+# Capped, a process costs ~13 threads, which keeps every tile count from 1 to 12
+# far below the cap. 8 OMP threads is also still generous on compute: 104
+# physical cores over 24 procs at 12 tiles is ~4 cores each. Raise them for a
+# low-tile-count run if CPU-side work ever looks starved.
+#
+# The opt-out names are TITAN_XPU_* rather than the variables themselves because
+# PBS exports OMP_NUM_THREADS=208 (the node's hardware thread count) into every
+# job: `${OMP_NUM_THREADS:-8}` would silently keep 208 and leave the largest of
+# the three pools uncapped. Measured on job 8914626 before this was fixed.
+export OMP_NUM_THREADS=${TITAN_XPU_OMP_NUM_THREADS:-8}
+export MKL_NUM_THREADS=${TITAN_XPU_MKL_NUM_THREADS:-$OMP_NUM_THREADS}
+export OPENBLAS_NUM_THREADS=${TITAN_XPU_OPENBLAS_NUM_THREADS:-1}
+export TOKIO_WORKER_THREADS=${TITAN_XPU_TOKIO_WORKER_THREADS:-4}
