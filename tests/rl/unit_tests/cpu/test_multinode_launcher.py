@@ -41,17 +41,20 @@ def test_shard_group_stays_within_one_node() -> None:
     assert derive(8, gpus_per_node=8) == (1, 8)
 
 
-@pytest.mark.parametrize("gpus_per_node", range(1, 13))
+@pytest.mark.parametrize("gpus_per_node", (1, 2, 4, 6, 8, 10, 12))
 @pytest.mark.parametrize("num_trainer_nodes", (1, 2, 3, 4, 8))
 @pytest.mark.parametrize("lora_rank", (None, 32))
 def test_every_supported_tile_count_yields_a_usable_mesh(
     gpus_per_node: int, num_trainer_nodes: int, lora_rank: int | None
 ) -> None:
-    """1 to 12 tiles per node is the whole supported range (an Aurora node has 12).
+    """1 and the even counts up to 12 are the supported tiles per node.
 
-    Every combination has to cover the allocation exactly and keep the shard
-    group inside a node; a gap either trains on part of the allocation or pays
-    cross-node all-gathers every layer.
+    An Aurora node is 6 cards of 2 tiles, so an odd count above 1 half-uses a
+    card, and an odd dp_shard of 5, 7, 9 or 11 cannot evenly shard a stacked
+    projection's dim 1; the launchers reject those. Every supported combination
+    has to cover the allocation exactly and keep the shard group inside a node;
+    a gap either trains on part of the allocation or pays cross-node
+    all-gathers every layer.
     """
     total = num_trainer_nodes * gpus_per_node
     dp_replicate, dp_shard = derive(

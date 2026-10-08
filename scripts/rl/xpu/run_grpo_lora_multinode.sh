@@ -44,14 +44,19 @@ conda activate ${CONDA_ENV:-monarch214}
 # correct and alive: without it tp=8 dies on `atl_ofi.cpp:1071 fi_cq_readerr
 # err 5` and tp4/rep2 trains with grad_norm 88-2464 vs a healthy 0.05-0.15.
 # PPN (tiles per node) is resolved here, before the device mask, because the mask
-# is derived from it. An Aurora node has 12 XPU tiles under
-# ZE_FLAT_DEVICE_HIERARCHY=FLAT (set by env_torch214.sh), so 1..12 is the whole
-# supported range; a larger value would otherwise fail deep inside Level Zero
-# with no hint of the cause.
+# is derived from it. Supported values are 1 and the even numbers up to 12; see
+# the long rationale in run_grpo_multinode.sh. In short: an Aurora node is 6
+# cards of 2 tiles, an odd count above 1 half-uses its last card, and an odd
+# dp_shard of 5, 7, 9 or 11 cannot evenly shard a stacked projection's dim 1.
+# The LoRA arm caps dp_shard at the adapter rank as well, so it reaches these
+# limits later, but the tile geometry is the same.
 PPN=${PPN:-4}
-if [ "$PPN" -lt 1 ] || [ "$PPN" -gt 12 ]; then
-    echo "ERROR: PPN=$PPN is outside 1..12; an Aurora node has 12 XPU tiles under"
-    echo "       ZE_FLAT_DEVICE_HIERARCHY=FLAT."
+if [ "$PPN" -lt 1 ] || [ "$PPN" -gt 12 ] ||
+    { [ "$PPN" -ne 1 ] && [ $((PPN % 2)) -ne 0 ]; }; then
+    echo "ERROR: PPN=$PPN is not supported; use 1, 2, 4, 6, 8, 10 or 12."
+    echo "       An Aurora node is 6 cards x 2 tiles = 12 tiles under"
+    echo "       ZE_FLAT_DEVICE_HIERARCHY=FLAT, so an odd count above 1 half-uses"
+    echo "       a card, and 5/7/9/11 cannot evenly shard a stacked projection."
     exit 1
 fi
 # One rank per tile, so expose exactly the tiles this run uses. Monarch hands

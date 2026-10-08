@@ -39,30 +39,34 @@ eval "$(${CONDA_PREFIX_BASE:-$HOME/miniforge3}/bin/conda shell.bash hook)"
 conda activate ${CONDA_ENV:-monarch214}
 
 # PPN (tiles per node) is resolved here, before the device mask, because the mask
-# is derived from it. An Aurora node has 12 XPU tiles under
-# ZE_FLAT_DEVICE_HIERARCHY=FLAT (set by env_torch214.sh), so 1..12 is the whole
-# supported range; a larger value would otherwise fail deep inside Level Zero
-# with no hint of the cause.
+# is derived from it. Supported values are 1 and the even numbers up to 12, all
+# verified on hardware 2026-10-08.
 #
-# Within 1..12, the model's parameter shapes constrain dp_shard, which
-# _derive_dp_degrees sets to PPN so a shard group stays inside one node. FSDP2
-# pads uneven shards on dim 0 but RAISES on any later dim, and a stacked
-# projection's dim 0 is the stack count, so a dp_shard above that count shards
-# dim 1 and must divide it exactly. Qwen3-0.6B has feed_forward.w13 of shape
-# (2, 3072, 1024), so PPN 1-4, 6, 8 and 12 work while 5, 7, 9, 10 and 11 die in
-# fully_shard with "FSDP does not support uneven sharding on dim 1 ...
-# (world size: PPN)".
+# An Aurora node is 6 cards of 2 tiles, 12 in total under
+# ZE_FLAT_DEVICE_HIERARCHY=FLAT (set by env_torch214.sh). Above 12 there is no
+# tile to assign and Level Zero fails with no hint of the cause. An odd count
+# above 1 takes one tile of its last card and leaves the partner tile idle,
+# which also puts that card in the half-used state where free-memory readings
+# alias across tiles, so it is rejected rather than merely discouraged.
 #
-# That is a cost of the locality cap, not a property of the hardware: the
-# previous hardcoded cap of 4 was FSDP-safe at every PPN because 4 divides 3072.
-# The way out is DP_REPLICATE, which divides dp_shard back down: PPN=10 with
-# DP_REPLICATE=5 gives dp_shard=8 on 8 nodes (3072/8=384) and still covers every
-# tile. All of PPN 1, 2, 4, 6, 8, 10 (with DP_REPLICATE=5) and 12 verified on
-# hardware 2026-10-08.
+# 5, 7, 9 and 11 could not work anyway: _derive_dp_degrees sets dp_shard to PPN
+# to keep a shard group inside one node, FSDP2 pads uneven shards on dim 0 but
+# RAISES on any later dim, and a stacked projection's dim 0 is the stack count,
+# so dp_shard above that count shards dim 1 and must divide it exactly.
+# Qwen3-0.6B's feed_forward.w13 is (2, 3072, 1024), and 3072 % PPN != 0 for
+# those four. Note this is a cost of the locality cap, not of the hardware: the
+# previous hardcoded cap of 4 divided 3072 at every PPN.
+#
+# PPN=10 hits the same divisibility wall and needs DP_REPLICATE=5, which divides
+# dp_shard back down to 8 on 8 nodes (3072/8=384) while still covering every tile.
 PPN=${PPN:-4}
-if [ "$PPN" -lt 1 ] || [ "$PPN" -gt 12 ]; then
-    echo "ERROR: PPN=$PPN is outside 1..12; an Aurora node has 12 XPU tiles under"
-    echo "       ZE_FLAT_DEVICE_HIERARCHY=FLAT."
+if [ "$PPN" -lt 1 ] || [ "$PPN" -gt 12 ] ||
+    { [ "$PPN" -ne 1 ] && [ $((PPN % 2)) -ne 0 ]; }; then
+    echo "ERROR: PPN=$PPN is not supported; use 1, 2, 4, 6, 8, 10 or 12."
+    echo "       An Aurora node is 6 cards x 2 tiles = 12 tiles under"
+    echo "       ZE_FLAT_DEVICE_HIERARCHY=FLAT, so an odd count above 1 half-uses"
+    echo "       a card, and 5/7/9/11 cannot evenly shard the stacked FFN weight."
+    echo "       PPN=10 additionally needs DP_REPLICATE=5."
     exit 1
 fi
 # One rank per tile, so expose exactly the tiles this run uses. Monarch hands
