@@ -50,7 +50,7 @@ from torchtitan.rl.model.vllm_registry import (
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
 from torchtitan.rl.types import Completion
-from torchtitan.tools.utils import has_cuda_capability
+from torchtitan.tools.utils import device_type, has_cuda_capability
 
 logger = logging.getLogger(__name__)
 
@@ -734,14 +734,6 @@ class VLLMGenerator(Configurable):
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
-        attention_config: AttentionConfig | None = None
-        """vLLM attention config for the engine.
-
-        ``None`` (default) derives the backend from the model's inner attention:
-        FLEX_ATTENTION for flex, CUSTOM otherwise. Set this on a platform that
-        supports neither (e.g. XPU) to name a backend vLLM does have there.
-        """
-
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the vLLM wrapper.
 
@@ -873,6 +865,12 @@ class VLLMGenerator(Configurable):
 
         # Build vLLM engine
         enable_ep = config.parallelism.expert_parallel_degree > 1
+        # CUDA graphs, the CuMem pool and vLLM's FLEX/CUSTOM backends are CUDA-only.
+        on_xpu = device_type == "xpu"
+        if on_xpu and (
+            config.cuda_graph.mode != "NONE" or config.enable_cumem_allocator
+        ):
+            logger.warning("XPU: ignoring cuda_graph.mode and enable_cumem_allocator")
         engine_kwargs = dict(
             # ``model`` is the path to the HF checkpoint directory. The
             # config is sourced from TorchTitan's model config via
@@ -899,18 +897,19 @@ class VLLMGenerator(Configurable):
             # tells vLLM to run one worker per process (no subprocess spawning)
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
-            enforce_eager=config.cuda_graph.mode == "NONE",
-            attention_config=config.attention_config
-            or AttentionConfig(
+            enforce_eager=on_xpu or config.cuda_graph.mode == "NONE",
+            attention_config=AttentionConfig(
                 backend=(
-                    AttentionBackendEnum.FLEX_ATTENTION
+                    None  # vLLM picks its own backend
+                    if on_xpu
+                    else AttentionBackendEnum.FLEX_ATTENTION
                     if isinstance(attention_backend, FlexInnerAttention.Config)
                     else AttentionBackendEnum.CUSTOM
                 ),
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
-            enable_cumem_allocator=config.enable_cumem_allocator,
+            enable_cumem_allocator=config.enable_cumem_allocator and not on_xpu,
         )
         engine_kwargs["max_model_len"] = model_config.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
@@ -923,11 +922,15 @@ class VLLMGenerator(Configurable):
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
         expert_sequence_parallel_size = config.parallelism.expert_sequence_parallel_size
-        vllm_compilation_config = config.cuda_graph.get_vllm_compilation_config(
-            max_num_seqs=self._max_num_seqs,
-            max_num_batched_tokens=config.max_num_batched_tokens,
-            expert_sequence_parallel_size=expert_sequence_parallel_size,
-            enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
+        vllm_compilation_config = (
+            None
+            if on_xpu
+            else config.cuda_graph.get_vllm_compilation_config(
+                max_num_seqs=self._max_num_seqs,
+                max_num_batched_tokens=config.max_num_batched_tokens,
+                expert_sequence_parallel_size=expert_sequence_parallel_size,
+                enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
+            )
         )
         if vllm_compilation_config is not None:
             engine_kwargs["compilation_config"] = vllm_compilation_config

@@ -44,14 +44,11 @@ from torchtitan.rl.generator import (
     VLLMCudaGraphConfig,
     VLLMGenerator,
 )
+from torchtitan.rl.model import vllm_worker
 from torchtitan.rl.model.vllm_registry import register_to_vllm
 from torchtitan.rl.model.vllm_worker import (
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
-)
-from torchtitan.rl.model.vllm_xpu_worker import (
-    TorchTitanXPUModelRunner,
-    TorchTitanXPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
 from vllm import SamplingParams
@@ -458,9 +455,15 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
     )
 
 
+# The XPU worker classes are defined only when the device is XPU.
+_ON_XPU = hasattr(vllm_worker, "TorchTitanXPUWorker")
+xpu_only = pytest.mark.skipif(not _ON_XPU, reason="XPU worker is defined on XPU only")
+
+
 @pytest.mark.parametrize(
     ("worker_cls", "base_worker_cls"),
-    [(TorchTitanGPUWorker, GPUWorker), (TorchTitanXPUWorker, XPUWorker)],
+    [(TorchTitanGPUWorker, GPUWorker)]
+    + ([(vllm_worker.TorchTitanXPUWorker, XPUWorker)] if _ON_XPU else []),
 )
 def test_only_weights_use_cumem_allocator(monkeypatch, worker_cls, base_worker_cls):
     monkeypatch.setattr(
@@ -478,9 +481,10 @@ def test_only_weights_use_cumem_allocator(monkeypatch, worker_cls, base_worker_c
         assert value is None
 
 
+@xpu_only
 def test_xpu_model_runner_keeps_torchtitan_overrides():
-    # The TorchTitan overrides must win over XPUModelRunner, and XPUModelRunner
-    # must still sit above GPUModelRunner so its constructor runs.
+    # TorchTitan overrides win over XPUModelRunner, which still precedes GPUModelRunner.
+    TorchTitanXPUModelRunner = vllm_worker.TorchTitanXPUModelRunner
     mro = TorchTitanXPUModelRunner.__mro__
     assert mro.index(TorchTitanGPUModelRunner) < mro.index(XPUModelRunner)
     for name in ("load_model", "_pad_for_sequence_parallelism"):
@@ -489,7 +493,10 @@ def test_xpu_model_runner_keeps_torchtitan_overrides():
         )
 
 
+@xpu_only
 def test_xpu_worker_builds_torchtitan_runner(monkeypatch):
+    TorchTitanXPUModelRunner = vllm_worker.TorchTitanXPUModelRunner
+    TorchTitanXPUWorker = vllm_worker.TorchTitanXPUWorker
     built = []
     monkeypatch.setattr(
         TorchTitanXPUModelRunner,

@@ -45,9 +45,8 @@ VLLM_MODEL_NAME = "TorchTitanCausalLM"
 TORCHTITAN_CONFIG_FORMAT = "torchtitan"
 
 # Selects the experiment-owned runner that pads tokens for dense and expert SP.
-# vLLM's CUDA worker rejects XPU devices, so XPU gets its own worker subclass.
 TORCHTITAN_WORKER_CLS = (
-    "torchtitan.rl.model.vllm_xpu_worker.TorchTitanXPUWorker"
+    "torchtitan.rl.model.vllm_worker.TorchTitanXPUWorker"
     if device_type == "xpu"
     else "torchtitan.rl.model.vllm_worker.TorchTitanGPUWorker"
 )
