@@ -21,14 +21,21 @@ python3 -m torchtitan.rl.train \
     --module my_rl_configs --config rl_grpo_qwen3_0_6b_varlen
 
 Set ``hf_assets_path`` in ``my_rl_configs.py`` to the model checkpoint path.
+
+On several hosts, run it as the client of a Monarch batch job (e.g.
+``monarch.job.SlurmJob`` or ``PBSJob``) with ``TORCHTITAN_MONARCH_JOB`` set to the
+dumped job; the trainer then takes the first hosts and the generators the rest.
 """
 
 import asyncio
 import logging
+import math
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
+from monarch.job import job_load
 
 from torchtitan.config import ConfigLoader
 from torchtitan.config.parallelism import ParallelismConfig
@@ -37,9 +44,13 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.rl._runtime import is_xpu_launch_env
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.tools.utils import device_module
 
 
 logger = logging.getLogger(__name__)
+
+# Path to a pickled Monarch job (``JobTrait.dump``) with one ``hosts`` mesh.
+MONARCH_JOB_ENV = "TORCHTITAN_MONARCH_JOB"
 
 
 def _device_visibility_env() -> str:
@@ -148,28 +159,73 @@ def _compute_generator_world_size(p: InferenceParallelismConfig) -> int:
 def _spawn_proc_mesh(
     host_mesh: HostMesh,
     role_world_size: int,
-    gpus_per_node: int,
+    provisioner: PerHostProvisioner,
     *,
     bootstrap: Callable[[], None],
-    role: str,
     extra_env: dict[str, str] | None = None,
 ) -> ProcMesh:
     """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
     evenly across the mesh's hosts. ``extra_env`` is applied in each proc's bootstrap.
+
+    Assumes ``_check_gpus_per_host`` passed: the split is even and the GPUs fit.
     """
     nodes = len(host_mesh)
-    assert role_world_size % nodes == 0, (
-        f"{role} world size ({role_world_size}) must be evenly divisible by its "
-        f"host count ({nodes})"
-    )
     role_gpus_per_node = role_world_size // nodes
-    provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
     env = provisioner.allocate(role_gpus_per_node, extra_env=extra_env)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
         bootstrap=bootstrap,
         bootstrap_command=default_bootstrap_cmd().with_env(env),
     )
+
+
+def _check_gpus_per_host(
+    host_meshes: HostMeshes, trainer_world_size: int, per_generator_world_size: int
+) -> None:
+    """Fail before spawning anything if the requested GPUs don't fit on the hosts.
+
+    A role's GPUs are split equally across the hosts of its mesh:
+
+        trainer, 4 GPUs, 2-host mesh -> 2 GPUs on each host           OK
+        trainer, 3 GPUs, 2-host mesh -> 1.5 GPUs on each host         fails
+
+    Roles given the same mesh object share its GPUs, trainer first:
+
+        meshes A and B: one host with 4 GPUs each
+        trainer=A (2 GPUs), generators=[A, A, B, B, B, B] (1 GPU each)
+            A: trainer 0,1 | gen0 2 | gen1 3
+            B: gen2 0 | gen3 1 | gen4 2 | gen5 3          OK
+        generators=[A, A, A, B, B, B]
+            A: trainer 0,1 | gen0 2 | gen1 3 | gen2 ?     5 > 4 GPUs: fails
+
+    It has to be the same object: two `this_host()` calls make two meshes, and each
+    starts at GPU 0.
+    """
+    trainer_roles = [("trainer", host_meshes.trainer, trainer_world_size)]
+    generator_roles = [
+        (f"generator{i}", host_mesh, per_generator_world_size)
+        for i, host_mesh in enumerate(host_meshes.generators)
+    ]
+    roles = trainer_roles + generator_roles
+    # For each mesh object (by id), the GPUs per host each of its roles needs.
+    role_gpus_by_mesh: dict[int, dict[str, int]] = {}
+    for role, host_mesh, role_world_size in roles:
+        nodes = len(host_mesh)
+        if role_world_size % nodes != 0:
+            raise ValueError(
+                f"{role} world size ({role_world_size}) must be evenly divisible by "
+                f"its host count ({nodes})"
+            )
+        role_gpus_by_mesh.setdefault(id(host_mesh), {})[role] = role_world_size // nodes
+
+    # Check that the roles on each mesh fit in its GPUs per host.
+    for role_gpus in role_gpus_by_mesh.values():
+        total_gpus = sum(role_gpus.values())
+        if total_gpus > host_meshes.gpus_per_node:
+            raise ValueError(
+                f"Roles on one host mesh need {total_gpus} GPUs per host, but "
+                f"gpus_per_node is {host_meshes.gpus_per_node}: {role_gpus}"
+            )
 
 
 def spawn_storage_volume_mesh_fn(
@@ -180,15 +236,60 @@ def spawn_storage_volume_mesh_fn(
     (see ``Controller.Config.storage_volumes_in_own_procs``).
 
     Relies on the trainer taking the first ``trainer_world_size / len(host_mesh)``
-    devices of each of its hosts, as both ``spawn_proc_mesh`` and the multinode
-    launcher do.
+    devices of each of its hosts, as ``spawn_proc_mesh`` does (the trainer is
+    allocated first on its host mesh); a fresh provisioner starts at the same
+    device.
     """
     return lambda: _spawn_proc_mesh(
         host_mesh,
         trainer_world_size,
-        gpus_per_node,
+        PerHostProvisioner(total_gpus=gpus_per_node),
         bootstrap=_preimport_torch,
-        role="storage volume",
+    )
+
+
+def plan_host_meshes(
+    hosts: HostMesh,
+    *,
+    trainer_world_size: int,
+    per_generator_world_size: int,
+    num_generators: int,
+    gpus_per_node: int,
+) -> HostMeshes:
+    """Split a job's hosts into the trainer's and one mesh per generator node.
+
+    One host is shared by every role. Otherwise the trainer takes the first
+    ``ceil(trainer_world_size / gpus_per_node)`` hosts and the generators the next
+    ones; generators on one node share its mesh, so they get disjoint GPUs.
+    """
+    if len(hosts) == 1:
+        return HostMeshes(
+            trainer=hosts,
+            generators=[hosts] * num_generators,
+            gpus_per_node=gpus_per_node,
+        )
+    if per_generator_world_size > gpus_per_node:
+        raise ValueError(
+            f"a generator needs {per_generator_world_size} GPUs; a node has {gpus_per_node}"
+        )
+    generators_per_node = gpus_per_node // per_generator_world_size
+    trainer_nodes = math.ceil(trainer_world_size / gpus_per_node)
+    generator_nodes = math.ceil(num_generators / generators_per_node)
+    if trainer_nodes + generator_nodes > len(hosts):
+        raise ValueError(
+            f"{trainer_nodes} trainer + {generator_nodes} generator nodes needed, "
+            f"the job has {len(hosts)}"
+        )
+    node_meshes = [
+        hosts.slice(hosts=slice(i, i + 1))
+        for i in range(trainer_nodes, trainer_nodes + generator_nodes)
+    ]
+    return HostMeshes(
+        trainer=hosts.slice(hosts=slice(0, trainer_nodes)),
+        generators=[
+            node_meshes[i // generators_per_node] for i in range(num_generators)
+        ],
+        gpus_per_node=gpus_per_node,
     )
 
 
@@ -206,7 +307,8 @@ def spawn_proc_mesh(
         trainer_world_size: Number of GPU procs to spawn for the trainer.
         per_generator_world_size: Number of GPU procs to spawn for each generator.
         host_meshes: Caller-provided trainer/generator host meshes. When
-            provided, each role is spawned on its provided host mesh. None means
+            provided, each role is spawned on its provided host mesh; roles given
+            the same host mesh object get non-overlapping GPU ranges on it. None means
             both roles are spawned on ``this_host()`` by using non-overlapping
             GPU ranges.
         num_generators: Number of generator proc meshes to spawn.
@@ -231,20 +333,27 @@ def spawn_proc_mesh(
             f"got {len(generator_host_meshes)}"
         )
 
+        _check_gpus_per_host(host_meshes, trainer_world_size, per_generator_world_size)
+        # Roles on the same mesh share one provisioner, which hands out the next free GPUs:
+        #   mesh A: trainer -> 0,1 | gen0 -> 2 | gen1 -> 3
+        # Keyed by id(mesh) because a HostMesh can't be a dict key.
+        provisioners: dict[int, PerHostProvisioner] = {}
+        for host_mesh in [trainer_host_mesh, *generator_host_meshes]:
+            provisioners.setdefault(
+                id(host_mesh), PerHostProvisioner(total_gpus=gpus_per_node)
+            )
         trainer_mesh = _spawn_proc_mesh(
             trainer_host_mesh,
             trainer_world_size,
-            gpus_per_node,
+            provisioners[id(trainer_host_mesh)],
             bootstrap=_preimport_torch,
-            role="trainer",
         )
         generator_meshes = [
             _spawn_proc_mesh(
                 gen_host_mesh,
                 per_generator_world_size,
-                gpus_per_node,
+                provisioners[id(gen_host_mesh)],
                 bootstrap=_bootstrap_generator,
-                role="generator",
                 extra_env=generator_env,
             )
             for gen_host_mesh in generator_host_meshes
@@ -277,6 +386,42 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
+def _job_host_meshes(config: Controller.Config) -> HostMeshes | None:
+    """Host meshes of the Monarch job named by ``TORCHTITAN_MONARCH_JOB``, if any.
+
+    Must run before the controller is built: loading the job sets the transport
+    that procs on other hosts use to reach this one.
+    """
+    job_path = os.environ.get(MONARCH_JOB_ENV)
+    if not job_path:
+        return None
+    trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
+    per_generator_world_size = _compute_generator_world_size(
+        config.generator.parallelism
+    )
+    host_meshes = plan_host_meshes(
+        job_load(job_path).state(cached_path=None).hosts,
+        trainer_world_size=trainer_world_size,
+        per_generator_world_size=per_generator_world_size,
+        num_generators=config.num_generators,
+        gpus_per_node=device_module.device_count(),
+    )
+    if host_meshes.generators[0] is not host_meshes.trainer:  # not one shared host
+        p = config.trainer.parallelism
+        logger.info(
+            f"Mesh split: {len(host_meshes.trainer)} trainer node(s) "
+            f"({trainer_world_size} GPUs, "
+            f"dp_replicate={p.data_parallel_replicate_degree}, "
+            f"dp_shard={p.data_parallel_shard_degree}, "
+            f"tp={p.tensor_parallel_degree}), "
+            f"{len({id(m) for m in host_meshes.generators})} generator node(s) "
+            f"({config.num_generators * per_generator_world_size} GPUs, "
+            f"{config.num_generators} generator(s) of "
+            f"{per_generator_world_size} GPU(s))"
+        )
+    return host_meshes
+
+
 async def main():
     init_logger()
     config = ConfigLoader().load()
@@ -288,6 +433,7 @@ async def main():
         enable=config.trainer.debug.enable_structured_logging,
     )
     sl.log_trace_instant("structured_logger_started")
+    host_meshes = _job_host_meshes(config)
 
     rl_trainer: Controller = config.build()
     try:
@@ -298,14 +444,16 @@ async def main():
         trainer_mesh, generator_meshes = spawn_proc_mesh(
             trainer_world_size,
             per_generator_world_size,
-            host_meshes=None,
+            host_meshes=host_meshes,
             num_generators=config.num_generators,
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,
             generator_meshes=generator_meshes,
             spawn_storage_volume_mesh=spawn_storage_volume_mesh_fn(
-                this_host(), trainer_world_size, trainer_world_size
+                host_meshes.trainer if host_meshes else this_host(),
+                trainer_world_size,
+                host_meshes.gpus_per_node if host_meshes else trainer_world_size,
             ),
         )
         await rl_trainer.run()
