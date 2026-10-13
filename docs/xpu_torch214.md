@@ -13,11 +13,14 @@ settings; only the `LoRAConverter` differs):
 
 | Arm | Config | Trains |
 |-----|--------|--------|
-| LoRA GRPO | `rl_grpo_lora_qwen3_0_6b` | LoRA adapters (rank 32) |
-| Full GRPO | `rl_grpo_full_qwen3_0_6b_flex` | every parameter |
+| LoRA GRPO | `rl_grpo_qwen3_0_6b_lora_<N>n_ppn<P>_<S>steps` | LoRA adapters (rank 32) |
+| Full GRPO | `rl_grpo_qwen3_0_6b_full_<N>n_ppn<P>_<S>steps` | every parameter |
 
-Both live in `torchtitan_recipes/rl/alphabet_sort_xpu.py` (Qwen3-0.6B,
-alphabet-sort task, 0/1 reward).
+Both are `rl_grpo_qwen3_0_6b_flex` from `torchtitan_recipes/rl/alphabet_sort.py`
+(Qwen3-0.6B, alphabet-sort task, 0/1 reward) laid out on N nodes x P tiles for S
+steps; the same recipes run on CUDA. XPU differences live in the code that hits
+them: the generator runs vLLM eager with its own attention backend, and the
+oneCCL workarounds below default on when the device is XPU.
 
 ## Reference results
 
@@ -83,7 +86,7 @@ The first is a regression from oneCCL 2021.17.2; the second also happens on
    runs that first pull one generator at a time. It costs tens of seconds once
    (26-50 s at 4 nodes, 50-160 s at 8); later pulls stay concurrent.
 
-Both flags default off in core torchtitan and are on in the XPU recipe. A third
+Both flags default to on when the device is XPU and off otherwise. A third
 oneCCL 2022 bug (a SIGSEGV once one process holds more than ~9 communicators on
 the scheduler path, [#224](https://github.com/uxlfoundation/oneCCL/issues/224)) is avoided because the default SYCL path is used; do not set
 `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` or `CCL_ENABLE_SYCL_KERNELS=0`.
@@ -116,7 +119,7 @@ export HF_ASSETS_PATH=/flare/Aurora_deployment/intel/models/Qwen3-0.6B
 ```
 
 The launchers read `TORCHTITAN_DIR`, `CONDA_PREFIX_BASE`, `CONDA_ENV` (default
-`monarch214`) and `ONEAPI_ENV_SCRIPT` (default
+`monarch_pbs`) and `ONEAPI_ENV_SCRIPT` (default
 `scripts/rl/xpu/env_torch214.sh`), all with the defaults above. `HF_ASSETS_PATH` is overridable the
 same way.
 
@@ -256,38 +259,25 @@ keeps pip from replacing the XPU torch.
 
 ## Running
 
-All four launchers are PBS scripts with their own headers. Overrides are
-environment variables; under `qsub` forward them with `-v`. `qsub` forwards no
-trailing arguments, so reach the config CLI through `EXTRA_ARGS`.
-
-### Single node (2 trainer + 2 generator tiles)
+One PBS script, `scripts/rl/xpu/run_grpo.sh`, runs `torchtitan.rl.train` on any
+node count. Overrides are environment variables (forward them with `qsub -v`):
 
 ```bash
 cd $TORCHTITAN_DIR
-qsub scripts/rl/xpu/run_grpo_lora_sn.sh        # LoRA, 10 steps
-qsub scripts/rl/xpu/run_grpo_sn.sh             # full, 10 steps
-NUM_STEPS=50 qsub -v NUM_STEPS scripts/rl/xpu/run_grpo_lora_sn.sh
+ln -s /flare/Aurora_deployment/intel/models/Qwen3-0.6B torchtitan/rl/example_checkpoint/Qwen3-0.6B
+qsub -l select=1 -v ARM=lora scripts/rl/xpu/run_grpo.sh                 # 2 trainer + 2 generator tiles
+qsub -l select=8 -q debug-scaling -v ARM=full,PPN=4 scripts/rl/xpu/run_grpo.sh
+qsub -l select=8 -l walltime=04:00:00 -q capacity -v NUM_STEPS=200 scripts/rl/xpu/run_grpo.sh
 ```
 
-### Multiple nodes (half trainer, half generator)
+It uses Monarch's `PBSJob` the way `SlurmJob` batch mode is used: the script dumps a
+`PBSJob({"hosts": <nodes>})` and points `TORCHTITAN_MONARCH_JOB` at it, then
+`python -m monarch._src.job._pbs_batch` starts one Monarch worker per node with Cray
+PALS `mpiexec` (`SlurmJob` uses `srun`) and runs `torchtitan.rl.train` as the client,
+which takes its hosts from the job: the trainer the first nodes, generators the rest.
 
-```bash
-cd $TORCHTITAN_DIR
-qsub -l select=4 -q debug-scaling scripts/rl/xpu/run_grpo_multinode.sh       # full
-qsub -l select=4 -q debug-scaling scripts/rl/xpu/run_grpo_lora_multinode.sh  # LoRA
-# 8 nodes, 200 steps (the reference runs)
-NUM_STEPS=200 qsub -l select=8 -l walltime=04:00:00 -q capacity -v NUM_STEPS \
-    scripts/rl/xpu/run_grpo_multinode.sh
-```
-
-Multinode overrides: `NUM_NODES` (use the first N of the allocation), `PPN`,
-`TP`, `DP_REPLICATE`, `CONFIG`, `NUM_STEPS`, `VAL_SAMPLES`, `HF_ASSETS_PATH`,
-`DUMP_FOLDER`, `MPIEXEC`, `EXTRA_ARGS`. The fabric block in the multinode
-scripts (CXI provider, Cray PALS `mpiexec` by absolute path, `--cpu-bind none`,
-`TMPDIR=/tmp`, `unset HOSTNAME`) is load-bearing; the comments in the scripts say
-what each line prevents.
-
-Logs: `$DUMP_FOLDER/train_<arm>_<N>n.log` under `$TORCHTITAN_DIR`.
+Overrides: `ARM` (full/lora), `PPN`, `NUM_STEPS` (2, 10 or 200),
+`CONFIG`, `DUMP_FOLDER`, `LOG`, `MPIEXEC`, `EXTRA_ARGS`. Logs: `$DUMP_FOLDER/train.log`.
 
 ## Known issues
 

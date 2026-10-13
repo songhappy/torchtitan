@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+import functools
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
 
@@ -29,7 +30,9 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     BatchInvariantFlexConverter,
+    LinearLoRAHandler,
     LMHeadCastConverter,
+    LoRATransform,
     ModelConfigConverter,
     ModelConfigTransformContext,
     TokenDispatcherTransform,
@@ -1347,3 +1350,91 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
         ),
     )
     return config
+
+
+def _qwen3_0_6b_host_layout(num_hosts: int, gpus_per_host: int) -> tuple[int, int, int]:
+    """``(dp_replicate, dp_shard, num_generators)`` for ``num_hosts`` hosts.
+
+    One host splits its GPUs between trainer and generators; more hosts train on
+    half of them with one dp_replicate group per trainer host, so the per-layer
+    all-gather stays on a host. When FSDP cannot shard Qwen3-0.6B's stacked FFN
+    weight (dim 1 = 3072) that way, the smallest dp_replicate that can is used.
+    """
+    if num_hosts == 1:
+        trainer, generators, replicas = (
+            gpus_per_host // 2,
+            gpus_per_host - gpus_per_host // 2,
+            1,
+        )
+    else:
+        trainer = num_hosts // 2 * gpus_per_host
+        generators = (num_hosts - num_hosts // 2) * gpus_per_host
+        replicas = num_hosts // 2
+    for rep in (replicas, *range(1, trainer + 1)):
+        shard = trainer // rep
+        if (
+            trainer % rep == 0
+            and shard <= gpus_per_host
+            and (shard <= 2 or 3072 % shard == 0)
+        ):
+            return rep, shard, generators
+    raise ValueError(f"no trainer mesh for {num_hosts} hosts x {gpus_per_host} GPUs")
+
+
+def _rl_grpo_qwen3_0_6b_hosts(
+    arm: str, num_hosts: int, gpus_per_host: int, steps: int
+) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_flex`` laid out on ``num_hosts`` x ``gpus_per_host``.
+
+    Single-GPU generators and trainer TP=1; loads the HF weights but saves no
+    checkpoint. ``arm="lora"`` trains rank-32 adapters on the attention projections.
+    """
+    config = rl_grpo_qwen3_0_6b_flex()
+    rep, shard, generators = _qwen3_0_6b_host_layout(num_hosts, gpus_per_host)
+    config.trainer.parallelism = dataclasses.replace(
+        config.trainer.parallelism,
+        data_parallel_replicate_degree=rep,
+        data_parallel_shard_degree=shard,
+        tensor_parallel_degree=1,
+    )
+    config.generator.parallelism = dataclasses.replace(
+        config.generator.parallelism, tensor_parallel_degree=1
+    )
+    config.num_generators = generators
+    config.async_loop.num_training_steps = steps
+    config.async_loop.validation.num_samples = 0
+    assert config.trainer.checkpointer is not None
+    config.trainer.checkpointer.load_only = True
+    if arm == "lora":
+        config = apply_transforms(
+            config,
+            [
+                LoRATransform(
+                    handlers=(LinearLoRAHandler(),),
+                    rank=32,
+                    alpha=64.0,
+                    target_modules=["wqkv", "wo"],
+                )
+            ],
+            # The RL tree keeps training/parallelism under `trainer`.
+            context=ModelConfigTransformContext(
+                training=config.trainer.training,
+                parallelism=config.trainer.parallelism,
+            ),
+        )
+    return config
+
+
+# rl_grpo_qwen3_0_6b_{full,lora}_<hosts>n_ppn<gpus>_<steps>steps, e.g.
+# rl_grpo_qwen3_0_6b_lora_8n_ppn4_10steps, for multi-host runs and the scaling matrix.
+for _arm in ("full", "lora"):
+    for _hosts in (1, 2, 4, 8, 16):
+        for _gpus in (1, 2, 4, 6, 8, 10, 12):
+            for _steps in (2, 10, 200):
+                if _hosts == 1 and _gpus < 2:
+                    continue
+                globals()[
+                    f"rl_grpo_qwen3_0_6b_{_arm}_{_hosts}n_ppn{_gpus}_{_steps}steps"
+                ] = functools.partial(
+                    _rl_grpo_qwen3_0_6b_hosts, _arm, _hosts, _gpus, _steps
+                )
