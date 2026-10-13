@@ -24,6 +24,7 @@ from torchtitan.rl.distributed.routing.strategies import (
     StickySessionRoutingStrategy,
 )
 from torchtitan.rl.distributed.routing.types import RoutingCandidate, RoutingContext
+from torchtitan.tools.utils import device_type
 
 
 class _GeneratorState(Enum):
@@ -104,18 +105,10 @@ class InterGeneratorRouter(Actor, Configurable):
         idle, so a weight sync may land mid-rollout and successive turns can run
         under different policy versions."""
 
-        sequential_initial_pull: bool = False
-        """When True, the initial pull (``pull_model_state_dict(...,
-        initial=True)``) runs one generator at a time; later pulls stay
-        concurrent.
-
-        TorchStore creates its XCCL communicators on a generator's first pull
-        and caches them, so this makes each storage volume create its
-        communicators one by one. On oneCCL 2022 and 2021.17.2,
-        concurrent communicator creation in one process fails in topology discovery
-        (``zesFabricPortGetConfig`` -> ``ZE_RESULT_ERROR_NOT_AVAILABLE``)."""
-        # TODO: remove once oneCCL communicator creation is safe to run concurrently
-        # (uxlfoundation/oneCCL#225).
+        sequential_initial_pull: bool = field(
+            default_factory=lambda: device_type == "xpu"
+        )
+        """Run the first pull one generator at a time (needed on XPU: oneCCL#225)."""
 
     def __init__(
         self,

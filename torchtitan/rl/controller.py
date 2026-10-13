@@ -136,6 +136,7 @@ from torchtitan.rl.rollout.rollouter import Rollouter
 from torchtitan.rl.rollout.types import GenerateFn
 from torchtitan.rl.trainer import Trainer
 from torchtitan.rl.types import Completion, TrainerStepBatch
+from torchtitan.tools.utils import device_type
 
 logger = logging.getLogger(__name__)
 
@@ -308,19 +309,10 @@ class Controller(Configurable):
         )
         """Generator routing strategy configuration."""
 
-        storage_volumes_in_own_procs: bool = False
-        """When True, TorchStore's storage volumes run in their own processes on
-        the trainer's hosts and devices instead of inside the trainer processes.
-
-        Works around a oneCCL 2022 bug: a process's position among the node's
-        devices is fixed by the FIRST communicator it creates, so a volume
-        hosted by a trainer process inherits the FSDP group's position, and its
-        later cross-node broadcasts from devices 1-3 complete without moving
-        any data. A volume process that never ran FSDP is unaffected. Needs
-        ``setup_async(spawn_storage_volume_mesh=...)``.
-        """
-        # TODO: remove once oneCCL computes the position per communicator
-        # (uxlfoundation/oneCCL#222).
+        storage_volumes_in_own_procs: bool = field(
+            default_factory=lambda: device_type == "xpu"
+        )
+        """Run TorchTitan's storage volumes in their own processes (needed on XPU: oneCCL#222)."""
 
         # TODO: rename it to metrics_processor
         metrics: m.MetricsProcessor.Config = field(
