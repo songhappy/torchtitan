@@ -151,7 +151,7 @@ export CONDA_PREFIX_BASE=$HOME/miniforge3
 | Repo | Branch | Commit | Contents |
 |------|--------|--------|----------|
 | torchtitan | this branch | -- | this guide |
-| monarch | `xpu-upstream` + `pbs-job` (github.com/songhappy/monarch), merged | `7a7fe9e15` + `f04942c9b` | PR #4307 (XPU actor runtime) and the `monarch.job.PBSJob` PR on upstream `main` `5283c8570` |
+| monarch | `pbs-job` (github.com/songhappy/monarch) | `5009e95d5` | upstream `main` `5283c8570` + PR #4307 (XPU actor runtime) + `monarch.job.PBSJob` |
 | torchstore | `xpu-all` (github.com/songhappy/torchstore) | `1ebced4` | PR #171 (XCCL transport) + replica dedup |
 | vLLM | upstream `main` | `083060d04` | no local patches |
 
@@ -197,7 +197,7 @@ dropping `_rust_tool_parser`.
 
 ```bash
 git clone https://github.com/songhappy/monarch.git $MONARCH_DIR && cd $MONARCH_DIR
-git checkout --detach origin/pbs-job && git merge --no-edit origin/xpu-upstream   # PBSJob PR + PR #4307
+git checkout pbs-job   # upstream main + PR #4307 + PBSJob
 GCC=/opt/aurora/26.181.0/spack/unified/1.1.1/install/linux-x86_64/gcc-13.4.0-22p27zg/bin   # the GNU gcc this was built with
 LLVM=/opt/aurora/26.181.0/spack/unified/1.1.1/install/linux-x86_64/llvm-develop-git.87717bf-7gy6r7k
 RUSTC_BOOTSTRAP=1 USE_TENSOR_ENGINE=0 \
