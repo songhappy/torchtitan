@@ -46,7 +46,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
-from torchtitan.tools.utils import device_type, round_up
+from torchtitan.tools.utils import round_up
 
 
 __all__ = [
@@ -264,15 +264,14 @@ class FlexInnerAttention(InnerAttention):
         # Recommended workflow: run once with max_autotune=True to discover
         # good kernel_options, then set kernel_options explicitly in the config
         # and keep max_autotune disabled for faster compilation.
-        # XPU: cold-cache autotune stalls a few ranks at 16 nodes and FSDP waits on them.
-        "max_autotune": device_type != "xpu",
+        "max_autotune": True,
         # When enabled, after max_autotune selects the best kernel config,
         # coordinate descent iteratively tunes individual parameters (block
         # sizes, num_warps, num_stages) one at a time -- doubling/halving each
         # and accepting changes that improve runtime by >0.1%. This can also
         # run without max_autotune but starts from a weaker baseline config.
         # See torch/_inductor/runtime/coordinate_descent_tuner.py.
-        "coordinate_descent_tuning": device_type != "xpu",
+        "coordinate_descent_tuning": True,
         "triton.cudagraphs": False,
     }
 
