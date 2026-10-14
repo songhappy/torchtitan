@@ -28,7 +28,7 @@ qsub -l select=1 -v ARM=lora scripts/rl/xpu/run_grpo.sh      # 1 node, 10 steps
 tail -f outputs/rl_grpo_qwen3_0_6b_lora_1n_ppn4_10steps/train.log
 ```
 
-Expect ten `Train | Step: N` lines; `qdel` the job after the last one
+Expect ten `Train | Step: N` lines; the job then ends by itself, with exit status 1
 ([teardown](#known-issues)).
 
 ## Configurations
@@ -52,12 +52,14 @@ default 4) and `S` the steps (2, 10, 200). The recipe fixes the layout:
   `dp_shard=10` cannot shard the FFN weight (3072), the recipe picks the smallest
   `dp_replicate` that can.
 
-For a model too large for one node, FSDP has to shard one copy across nodes. These
-variants do that (select them with `DP_REPLICATE=<R>`):
+For a model too large for one node, FSDP has to shard one copy across nodes. Every layout
+on 4 or more nodes also has `_rep1` and `_rep2` variants (select them with
+`DP_REPLICATE=<R>`): R copies, each sharded across `trainer GPUs / R` tiles. For example:
 
 | Config | Nodes | dp_replicate x dp_shard | Nodes per model copy |
 |--------|-------|-------------------------|----------------------|
-| `rl_grpo_qwen3_0_6b_{full,lora}_4n_ppn4_rep1_2steps` | 4 | 1 x 8 | 2 |
+| `rl_grpo_qwen3_0_6b_{full,lora}_16n_ppn4_rep2_2steps` | 16 | 2 x 16 | 4 |
+| `rl_grpo_qwen3_0_6b_{full,lora}_16n_ppn4_rep1_2steps` | 16 | 1 x 32 | 8 |
 | `rl_grpo_qwen3_0_6b_{full,lora}_8n_ppn4_rep1_2steps` | 8 | 1 x 16 | 4 |
 | `rl_grpo_qwen3_0_6b_{full,lora}_8n_ppn4_rep2_2steps` | 8 | 2 x 8 | 2 (full arm hangs, see [Known issues](#known-issues)) |
 
@@ -98,8 +100,9 @@ hosts.
 ## A healthy run
 
 - every requested step logs a `Train | Step: N` line;
-- reward is non-zero from step 1 and there is no `untrainable batches` warning (zero
-  weights in the generators show up as reward 0 and untrainable batches);
+- reward is non-zero from step 1. An occasional `Consecutive untrainable batches: 1/10` is
+  normal (every sample of a group got the same reward); reward 0 with that count climbing
+  toward 10 means the generators received zero weights;
 - `grad_norm` in the ranges below: LoRA about 0.02-0.5, full about 0.2-4 (full is taken
   over all parameters; compare it only with full runs);
 - the `Mesh split` line in `train.log` shows the mesh you expect -- read the mesh from that
@@ -148,7 +151,7 @@ export CONDA_PREFIX_BASE=$HOME/miniforge3
 | Repo | Branch | Commit | Contents |
 |------|--------|--------|----------|
 | torchtitan | this branch | -- | this guide |
-| monarch | `int/xpu-pbs` (github.com/songhappy/monarch) | `5009e95d5` | upstream `main` `5283c8570` + PR #4307 (XPU actor runtime) + `monarch.job.PBSJob` |
+| monarch | `xpu-upstream` + `pbs-job` (github.com/songhappy/monarch), merged | `7a7fe9e15` + `f04942c9b` | PR #4307 (XPU actor runtime) and the `monarch.job.PBSJob` PR on upstream `main` `5283c8570` |
 | torchstore | `xpu-all` (github.com/songhappy/torchstore) | `1ebced4` | PR #171 (XCCL transport) + replica dedup |
 | vLLM | upstream `main` | `083060d04` | no local patches |
 
@@ -193,8 +196,9 @@ dropping `_rust_tool_parser`.
 ### 4. Monarch
 
 ```bash
-cd $MONARCH_DIR && git checkout int/xpu-pbs
-GCC=$(dirname $(which gcc))
+git clone https://github.com/songhappy/monarch.git $MONARCH_DIR && cd $MONARCH_DIR
+git checkout --detach origin/pbs-job && git merge --no-edit origin/xpu-upstream   # PBSJob PR + PR #4307
+GCC=/opt/aurora/26.181.0/spack/unified/1.1.1/install/linux-x86_64/gcc-13.4.0-22p27zg/bin   # the GNU gcc this was built with
 LLVM=/opt/aurora/26.181.0/spack/unified/1.1.1/install/linux-x86_64/llvm-develop-git.87717bf-7gy6r7k
 RUSTC_BOOTSTRAP=1 USE_TENSOR_ENGINE=0 \
 PROTOC=$CONDA_PREFIX/lib/python3.12/site-packages/torch/bin/protoc \
@@ -209,8 +213,8 @@ python -c "from monarch.actor import Actor; from monarch.job import PBSJob; impo
 
 Why: `USE_TENSOR_ENGINE=0` builds only the actor runtime RL uses; `RUSTC_BOOTSTRAP=1` lets
 stable rustc take the nightly flags `setup.py` passes; `PROTOC` is the one torch bundles;
-`CC`/`CXX` must be GNU gcc (the oneAPI env sets `CC=icx`, whose intrinsics GNU `ld` cannot
-link); the cargo linker override replaces conda's `x86_64-conda-linux-gnu-cc`, whose
+`CC`/`CXX` must be GNU gcc -- 13.4 is the tested one (the oneAPI env sets `CC=icx`, whose
+intrinsics GNU `ld` cannot link); the cargo linker override replaces conda's `x86_64-conda-linux-gnu-cc`, whose
 sysroot lacks the glibc 2.38 symbols `aws-lc-sys` needs; `LIBCLANG_PATH` and
 `BINDGEN_EXTRA_CLANG_ARGS` let `libsqlite3-sys` (upstream telemetry) find libclang.
 
@@ -290,10 +294,11 @@ weight-grad backward).
 
 ## Known issues
 
-- **Teardown hangs after the last step.** `qdel` the job once the final `Train | Step` line
-  appears; PBS then reports a walltime exit for a run that succeeded.
-- **Full GRPO hangs at `dp_replicate=2 x dp_shard=8` on 4 trainer nodes**
-  (`..._full_8n_ppn4_rep2_2steps`, seen 2026-10-14). All 16 trainer ranks stop inside the
+- **A finished run exits with status 1.** Teardown aborts after the last `Train | Step` line
+  (verified 2026-10-14 at 1 and 8 nodes: the job ends by itself within a minute). Judge a run
+  by its step lines, not by the PBS exit status.
+- **Cross-node FSDP: full GRPO hangs at `dp_replicate=2 x dp_shard=8`** on 4 trainer
+  nodes (`..._full_8n_ppn4_rep2_2steps`, seen 2026-10-14). All 16 trainer ranks stop inside the
   first `forward_backward`, with no error, until walltime. LoRA passes on the same layout,
   and full GRPO passes with one copy sharded across nodes (`dp_replicate=1`) and with one
   copy per node. It is the only layout where gradients cross nodes in both the shard-group
@@ -305,12 +310,12 @@ weight-grad backward).
 - **Never point `TORCHINDUCTOR_CACHE_DIR` at `/home`.** With one cache shared by all nodes,
   at 16 nodes a trainer rank intermittently fails to compile flex attention (`@jit functions
   should be defined in a Python file`) and the run hangs as above.
-- **Monarch startup flake**: `cast.service ... actor does not exist` before any step.
-  Intermittent; resubmit.
-- **vLLM "not enough free memory" at startup, 0 steps**: a phantom of Level Zero's lagging
-  memory report. Resubmit before changing `gpu_memory_limit`.
-- **Checkpoint saving is off** (`load_only=True` in the recipe): the DCP save ran out of
-  device memory inside oneCCL at 8 nodes. Do not disable the checkpointer instead; that also
-  skips loading the pretrained weights.
-- **vLLM TP=2 SIGSEGVs at process exit** on this stack. The TP=1 generators these configs
-  use do not hit it.
+- **Checkpoint saving is off** (`load_only=True` in the recipe): on the torch 2.12 stack the
+  DCP save ran out of device memory inside oneCCL at 8 nodes; not re-tested on 2.14. Do not
+  disable the checkpointer instead; that also skips loading the pretrained weights.
+- **vLLM TP=2 SIGSEGVs at process exit** (seen 2026-10-01 on this stack, not re-tested).
+  The TP=1 generators these configs use do not hit it.
+- Seen with the older Monarch build, not in the 78 runs since the move to Monarch `main`
+  + `PBSJob`: a startup flake `cast.service ... actor does not exist`, and a vLLM "not
+  enough free memory" abort at startup (a phantom of Level Zero's lagging memory report).
+  If either appears, resubmit before changing anything.
