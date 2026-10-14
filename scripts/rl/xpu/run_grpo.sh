@@ -50,7 +50,8 @@ export ZE_ENABLE_PCI_ID_DEVICE_ORDER=1 TORCH_LLM_ALLREDUCE=1
 export TMPDIR=/tmp  # PBS's TMPDIR exists only on the head node
 unset HOSTNAME      # else every node looks local to TorchStore
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-hsn0}
-export TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR:-$HOME/.cache/torchinductor_xpu}
+# Inductor and Triton cache under $TMPDIR (node-local) by default; a cache on /home shared by
+# every node races: a rank reads back a kernel file another node is replacing and fails to compile.
 export VLLM_ENABLE_V1_MULTIPROCESSING=1 HF_DATASETS_OFFLINE=1 HF_HUB_OFFLINE=1 WANDB_MODE=disabled
 # Spawning a host's procs (torch + vLLM imports) takes longer than Monarch's 30 s default.
 export HYPERACTOR_HOST_SPAWN_READY_TIMEOUT=300s HYPERACTOR_MESH_PROC_SPAWN_MAX_IDLE=300s

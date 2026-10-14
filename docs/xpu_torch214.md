@@ -295,5 +295,7 @@ Overrides: `ARM` (full/lora), `PPN`, `NUM_STEPS` (2, 10 or 200),
   checkpointer to avoid saves; that also skips loading the pretrained weights.
 - **vLLM TP=2 SIGSEGVs at process exit** on this stack, after finishing its
   work. Not hit by the TP=1 generators these configs use.
-- **Inductor cache corruption** (`CompiledFxGraph has no attribute
-  compiled_fn_runner`): `rm -rf $TORCHINDUCTOR_CACHE_DIR`.
+- **Keep the inductor cache node-local.** `run_grpo.sh` leaves it under `$TMPDIR`
+  (`/tmp`). One cache on `/home` shared by all nodes races: at 16 nodes a trainer rank
+  intermittently fails to compile flex attention (`@jit functions should be defined in a
+  Python file`) and the other ranks then wait in FSDP collectives until walltime.
