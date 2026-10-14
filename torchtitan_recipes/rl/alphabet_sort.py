@@ -1435,7 +1435,8 @@ def _rl_grpo_qwen3_0_6b_hosts(
 
 
 # rl_grpo_qwen3_0_6b_{full,lora}_<hosts>n_ppn<gpus>_<steps>steps, e.g.
-# rl_grpo_qwen3_0_6b_lora_8n_ppn4_10steps, for multi-host runs and the scaling matrix.
+# rl_grpo_qwen3_0_6b_lora_8n_ppn4_10steps, for multi-host runs and the scaling matrix; on 4+ hosts
+# also ..._rep<R>_<steps>steps (e.g. rl_grpo_qwen3_0_6b_full_16n_ppn4_rep2_2steps).
 for _arm in ("full", "lora"):
     for _hosts in (1, 2, 4, 8, 16):
         for _gpus in (1, 2, 4, 6, 8, 10, 12):
@@ -1447,33 +1448,17 @@ for _arm in ("full", "lora"):
                 ] = functools.partial(
                     _rl_grpo_qwen3_0_6b_hosts, _arm, _hosts, _gpus, _steps
                 )
-
-
-def rl_grpo_qwen3_0_6b_full_4n_ppn4_rep1_2steps() -> Controller.Config:
-    """4 hosts x 4 GPUs, FSDP across hosts: dp_replicate=1, dp_shard=8 (2 hosts per copy)."""
-    return _rl_grpo_qwen3_0_6b_hosts("full", 4, 4, 2, dp_replicate=1)
-
-
-def rl_grpo_qwen3_0_6b_full_8n_ppn4_rep1_2steps() -> Controller.Config:
-    """8 hosts x 4 GPUs, FSDP across hosts: dp_replicate=1, dp_shard=16 (4 hosts per copy)."""
-    return _rl_grpo_qwen3_0_6b_hosts("full", 8, 4, 2, dp_replicate=1)
-
-
-def rl_grpo_qwen3_0_6b_full_8n_ppn4_rep2_2steps() -> Controller.Config:
-    """8 hosts x 4 GPUs, FSDP across hosts: dp_replicate=2, dp_shard=8 (2 hosts per copy)."""
-    return _rl_grpo_qwen3_0_6b_hosts("full", 8, 4, 2, dp_replicate=2)
-
-
-def rl_grpo_qwen3_0_6b_lora_4n_ppn4_rep1_2steps() -> Controller.Config:
-    """4 hosts x 4 GPUs, FSDP across hosts: dp_replicate=1, dp_shard=8 (2 hosts per copy)."""
-    return _rl_grpo_qwen3_0_6b_hosts("lora", 4, 4, 2, dp_replicate=1)
-
-
-def rl_grpo_qwen3_0_6b_lora_8n_ppn4_rep1_2steps() -> Controller.Config:
-    """8 hosts x 4 GPUs, FSDP across hosts: dp_replicate=1, dp_shard=16 (4 hosts per copy)."""
-    return _rl_grpo_qwen3_0_6b_hosts("lora", 8, 4, 2, dp_replicate=1)
-
-
-def rl_grpo_qwen3_0_6b_lora_8n_ppn4_rep2_2steps() -> Controller.Config:
-    """8 hosts x 4 GPUs, FSDP across hosts: dp_replicate=2, dp_shard=8 (2 hosts per copy)."""
-    return _rl_grpo_qwen3_0_6b_hosts("lora", 8, 4, 2, dp_replicate=2)
+                # _rep<R>: R model copies, each sharded across hosts (FSDP across nodes).
+                for _rep in (1, 2):
+                    if _hosts > 2 and _hosts // 2 * _gpus % _rep == 0:
+                        globals()[
+                            f"rl_grpo_qwen3_0_6b_{_arm}_{_hosts}n_ppn{_gpus}"
+                            f"_rep{_rep}_{_steps}steps"
+                        ] = functools.partial(
+                            _rl_grpo_qwen3_0_6b_hosts,
+                            _arm,
+                            _hosts,
+                            _gpus,
+                            _steps,
+                            dp_replicate=_rep,
+                        )
