@@ -13,9 +13,12 @@
 # Runs rl_grpo_qwen3_0_6b_<ARM>_<nodes>n_ppn<PPN>_<NUM_STEPS>steps from
 # torchtitan_recipes/rl/alphabet_sort.py unless CONFIG is set. The model is read
 # from torchtitan/rl/example_checkpoint/Qwen3-0.6B (a link to the shared copy).
-# Overridable: ARM PPN NUM_STEPS CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
+# DP_REPLICATE=<R> runs the _rep<R> variant (FSDP across nodes), e.g. 8 nodes:
+#   qsub -l select=8 -v ARM=full,PPN=4,NUM_STEPS=2,DP_REPLICATE=1 scripts/rl/xpu/run_grpo.sh
+# Overridable: ARM PPN NUM_STEPS DP_REPLICATE CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
 
-TORCHTITAN_DIR=${TORCHTITAN_DIR:-$HOME/git/torchtitan}
+# The checkout qsub ran from (cd there first), so a second clone runs its own code.
+TORCHTITAN_DIR=${TORCHTITAN_DIR:-${PBS_O_WORKDIR:-$HOME/git/torchtitan}}
 source "${ONEAPI_ENV_SCRIPT:-$TORCHTITAN_DIR/scripts/rl/xpu/env_torch214.sh}"
 eval "$("${CONDA_PREFIX_BASE:-$HOME/miniforge3}/bin/conda" shell.bash hook)"
 conda activate "${CONDA_ENV:-monarch_pbs}"  # Monarch with monarch.job.PBSJob
@@ -27,7 +30,7 @@ MPIEXEC=${MPIEXEC:-/opt/cray/pals/1.8/bin/mpiexec}  # PALS, not Intel MPI's Hydr
 EXTRA_ARGS=${EXTRA_ARGS:-}  # qsub passes no script args; extra flags go through here
 mapfile -t NODES < <(sed 's/\..*//' "${PBS_NODEFILE:?run inside a PBS job}" | awk '!seen[$0]++')
 NUM_NODES=${#NODES[@]}
-CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}_${NUM_STEPS}steps}
+CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}${DP_REPLICATE:+_rep$DP_REPLICATE}_${NUM_STEPS}steps}
 DUMP_FOLDER=${DUMP_FOLDER:-outputs/${CONFIG}}
 LOG=${LOG:-$DUMP_FOLDER/train.log}
 

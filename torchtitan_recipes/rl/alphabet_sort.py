@@ -1382,15 +1382,24 @@ def _qwen3_0_6b_host_layout(num_hosts: int, gpus_per_host: int) -> tuple[int, in
 
 
 def _rl_grpo_qwen3_0_6b_hosts(
-    arm: str, num_hosts: int, gpus_per_host: int, steps: int
+    arm: str,
+    num_hosts: int,
+    gpus_per_host: int,
+    steps: int,
+    *,
+    dp_replicate: int | None = None,
 ) -> Controller.Config:
     """``rl_grpo_qwen3_0_6b_flex`` laid out on ``num_hosts`` x ``gpus_per_host``.
 
     Single-GPU generators and trainer TP=1; loads the HF weights but saves no
     checkpoint. ``arm="lora"`` trains rank-32 adapters on the attention projections.
+    ``dp_replicate`` overrides the per-host replicas, so one model copy is sharded
+    across hosts (the layout a model too large for one host needs).
     """
     config = rl_grpo_qwen3_0_6b_flex()
     rep, shard, generators = _qwen3_0_6b_host_layout(num_hosts, gpus_per_host)
+    if dp_replicate is not None:
+        rep, shard = dp_replicate, rep * shard // dp_replicate
     config.trainer.parallelism = dataclasses.replace(
         config.trainer.parallelism,
         data_parallel_replicate_degree=rep,
@@ -1438,3 +1447,33 @@ for _arm in ("full", "lora"):
                 ] = functools.partial(
                     _rl_grpo_qwen3_0_6b_hosts, _arm, _hosts, _gpus, _steps
                 )
+
+
+def rl_grpo_qwen3_0_6b_full_4n_ppn4_rep1_2steps() -> Controller.Config:
+    """4 hosts x 4 GPUs, FSDP across hosts: dp_replicate=1, dp_shard=8 (2 hosts per copy)."""
+    return _rl_grpo_qwen3_0_6b_hosts("full", 4, 4, 2, dp_replicate=1)
+
+
+def rl_grpo_qwen3_0_6b_full_8n_ppn4_rep1_2steps() -> Controller.Config:
+    """8 hosts x 4 GPUs, FSDP across hosts: dp_replicate=1, dp_shard=16 (4 hosts per copy)."""
+    return _rl_grpo_qwen3_0_6b_hosts("full", 8, 4, 2, dp_replicate=1)
+
+
+def rl_grpo_qwen3_0_6b_full_8n_ppn4_rep2_2steps() -> Controller.Config:
+    """8 hosts x 4 GPUs, FSDP across hosts: dp_replicate=2, dp_shard=8 (2 hosts per copy)."""
+    return _rl_grpo_qwen3_0_6b_hosts("full", 8, 4, 2, dp_replicate=2)
+
+
+def rl_grpo_qwen3_0_6b_lora_4n_ppn4_rep1_2steps() -> Controller.Config:
+    """4 hosts x 4 GPUs, FSDP across hosts: dp_replicate=1, dp_shard=8 (2 hosts per copy)."""
+    return _rl_grpo_qwen3_0_6b_hosts("lora", 4, 4, 2, dp_replicate=1)
+
+
+def rl_grpo_qwen3_0_6b_lora_8n_ppn4_rep1_2steps() -> Controller.Config:
+    """8 hosts x 4 GPUs, FSDP across hosts: dp_replicate=1, dp_shard=16 (4 hosts per copy)."""
+    return _rl_grpo_qwen3_0_6b_hosts("lora", 8, 4, 2, dp_replicate=1)
+
+
+def rl_grpo_qwen3_0_6b_lora_8n_ppn4_rep2_2steps() -> Controller.Config:
+    """8 hosts x 4 GPUs, FSDP across hosts: dp_replicate=2, dp_shard=8 (2 hosts per copy)."""
+    return _rl_grpo_qwen3_0_6b_hosts("lora", 8, 4, 2, dp_replicate=2)
