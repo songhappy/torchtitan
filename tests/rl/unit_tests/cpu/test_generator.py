@@ -55,8 +55,6 @@ from vllm import SamplingParams
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.worker.gpu_worker import Worker as GPUWorker
-from vllm.v1.worker.xpu_model_runner import XPUModelRunner
-from vllm.v1.worker.xpu_worker import XPUWorker
 
 
 class _FakeRenderer:
@@ -458,6 +456,9 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
 # The XPU worker classes are defined only when the device is XPU.
 _ON_XPU = hasattr(vllm_worker, "TorchTitanXPUWorker")
 xpu_only = pytest.mark.skipif(not _ON_XPU, reason="XPU worker is defined on XPU only")
+if _ON_XPU:
+    from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+    from vllm.v1.worker.xpu_worker import XPUWorker
 
 
 @pytest.mark.parametrize(

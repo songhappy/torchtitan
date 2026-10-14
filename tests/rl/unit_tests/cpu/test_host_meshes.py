@@ -6,6 +6,8 @@
 
 """CPU tests for the multi-host plan in torchtitan.rl.train."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from torchtitan.rl import train
@@ -71,4 +73,5 @@ def test_plan_rejects_too_few_hosts_and_oversized_generators():
 
 def test_no_job_env_means_single_host(monkeypatch):
     monkeypatch.delenv(train.MONARCH_JOB_ENV, raising=False)
-    assert train._job_host_meshes(None) is None
+    # Without a job the config is never read.
+    assert train._job_host_meshes(SimpleNamespace()) is None
