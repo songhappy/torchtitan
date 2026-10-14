@@ -1,164 +1,170 @@
-# GRPO on Intel XPU with torch 2.14: reproduction guide
+# GRPO on Intel XPU (Aurora, torch 2.14)
 
-This branch runs end-to-end GRPO on Aurora (Intel Data Center GPU Max
-1550) on the **torch 2.14.0+xpu / oneCCL 2022** stack: Monarch actors, TorchStore
-weight sync, vLLM generation, FSDP2 training. It is written for a validation team
-that wants to rebuild the stack and reproduce the reference runs below.
+This branch runs end-to-end GRPO on Aurora (Intel Data Center GPU Max 1550) with the
+upstream torchtitan RL stack -- Monarch actors, TorchStore weight sync, vLLM generation,
+FSDP2 training -- on **torch 2.14.0+xpu and oneCCL 2022**. It is written for a team that
+wants to rebuild the stack, run the reference workloads and check that a run is healthy.
 
-This guide covers what to build, what to run, and what a correct run looks like
-on torch 2.14, plus everything that changed from the earlier torch 2.12 stack.
+The XPU support follows the CUDA code paths; differences are decided where they matter
+(device type checks in the generator, worker and launch env, oneCCL workarounds that
+default on for XPU). The only Aurora-specific pieces are the launcher
+(`scripts/rl/xpu/run_grpo.sh`, which uses Monarch's `PBSJob` the way `SlurmJob` is used on
+Slurm), the environment script (`scripts/rl/xpu/env_torch214.sh`) and the layout recipes.
 
-Two training arms, controlled twins (same batch, lr, sampling and generator
-settings; only the `LoRAConverter` differs):
+Contents: [Quick start](#quick-start) - [Configurations](#configurations) -
+[Running](#running) - [A healthy run](#a-healthy-run) - [Reference results](#reference-results) -
+[Environment setup](#environment-setup) - [XPU settings and why](#xpu-settings-and-why) -
+[Known issues](#known-issues)
+
+## Quick start
+
+With the environment built ([Environment setup](#environment-setup)), from this checkout:
+
+```bash
+export HF_ASSETS_PATH=/flare/Aurora_deployment/intel/models/Qwen3-0.6B
+mkdir -p torchtitan/rl/example_checkpoint   # the recipes read the model from here
+ln -sfn $HF_ASSETS_PATH torchtitan/rl/example_checkpoint/Qwen3-0.6B
+qsub -l select=1 -v ARM=lora scripts/rl/xpu/run_grpo.sh      # 1 node, 10 steps
+tail -f outputs/rl_grpo_qwen3_0_6b_lora_1n_ppn4_10steps/train.log
+```
+
+Expect ten `Train | Step: N` lines; `qdel` the job after the last one
+([teardown](#known-issues)).
+
+## Configurations
+
+All runs use `rl_grpo_qwen3_0_6b_flex` from `torchtitan_recipes/rl/alphabet_sort.py`
+(Qwen3-0.6B, alphabet-sort task, 0/1 reward) in two arms that differ only in the
+`LoRATransform`:
 
 | Arm | Config | Trains |
 |-----|--------|--------|
-| LoRA GRPO | `rl_grpo_qwen3_0_6b_lora_<N>n_ppn<P>_<S>steps` | LoRA adapters (rank 32) |
 | Full GRPO | `rl_grpo_qwen3_0_6b_full_<N>n_ppn<P>_<S>steps` | every parameter |
+| LoRA GRPO | `rl_grpo_qwen3_0_6b_lora_<N>n_ppn<P>_<S>steps` | rank-32 adapters on `wqkv`, `wo` |
 
-Both are `rl_grpo_qwen3_0_6b_flex` from `torchtitan_recipes/rl/alphabet_sort.py`
-(Qwen3-0.6B, alphabet-sort task, 0/1 reward) laid out on N nodes x P tiles for S
-steps; the same recipes run on CUDA. XPU differences live in the code that hits
-them: the generator runs vLLM eager with its own attention backend, and the
-oneCCL workarounds below default on when the device is XPU.
+`N` is the node count (1, 2, 4, 8, 16), `P` the tiles per node (1, 2, 4, 6, 8, 10, 12;
+default 4) and `S` the steps (2, 10, 200). The recipe fixes the layout:
+
+- **1 node**: the trainer and the generators share the node's tiles (2 + 2 at `P=4`).
+- **N nodes**: the trainer takes the first N/2 nodes, single-tile vLLM generators the rest.
+  Each trainer node holds one model copy: `dp_replicate` = trainer nodes, `dp_shard` =
+  tiles per node, so FSDP's per-layer all-gather stays inside a node. At `P=10`, where
+  `dp_shard=10` cannot shard the FFN weight (3072), the recipe picks the smallest
+  `dp_replicate` that can.
+
+For a model too large for one node, FSDP has to shard one copy across nodes. These
+variants do that (select them with `DP_REPLICATE=<R>`):
+
+| Config | Nodes | dp_replicate x dp_shard | Nodes per model copy |
+|--------|-------|-------------------------|----------------------|
+| `rl_grpo_qwen3_0_6b_{full,lora}_4n_ppn4_rep1_2steps` | 4 | 1 x 8 | 2 |
+| `rl_grpo_qwen3_0_6b_{full,lora}_8n_ppn4_rep1_2steps` | 8 | 1 x 16 | 4 |
+| `rl_grpo_qwen3_0_6b_{full,lora}_8n_ppn4_rep2_2steps` | 8 | 2 x 8 | 2 (full arm hangs, see [Known issues](#known-issues)) |
+
+## Running
+
+`scripts/rl/xpu/run_grpo.sh` is one PBS script for every node count. Submit it from the
+checkout -- it runs the code of the directory `qsub` was run from -- and pass overrides
+with `qsub -v`:
+
+```bash
+qsub -l select=1 -v ARM=lora scripts/rl/xpu/run_grpo.sh
+qsub -l select=8 -q debug-scaling -v ARM=full,PPN=4 scripts/rl/xpu/run_grpo.sh
+qsub -l select=8 -l walltime=04:00:00 -q capacity -v NUM_STEPS=200 scripts/rl/xpu/run_grpo.sh
+qsub -l select=8 -q capacity -v ARM=full,PPN=4,NUM_STEPS=2,DP_REPLICATE=1 scripts/rl/xpu/run_grpo.sh
+```
+
+| Override | Default | Meaning |
+|----------|---------|---------|
+| `ARM` | `full` | `full` or `lora` |
+| `PPN` | `4` | tiles per node; 1 or an even number up to 12 |
+| `NUM_STEPS` | `10` | 2, 10 or 200 |
+| `DP_REPLICATE` | unset | select the `_rep<R>` variant (FSDP across nodes) |
+| `CONFIG` | from the above | any config in `alphabet_sort.py` |
+| `DUMP_FOLDER`, `LOG` | `outputs/<config>`, `$DUMP_FOLDER/train.log` | output locations |
+| `CONDA_ENV` | `monarch_pbs` | the env from [Environment setup](#environment-setup) |
+| `TORCHTITAN_DIR`, `ONEAPI_ENV_SCRIPT`, `MPIEXEC`, `EXTRA_ARGS` | see the script | rarely needed |
+
+Per-user queue limits on Aurora: `debug` (<= 2 nodes) and `debug-scaling` take one
+running and one queued job each, `capacity` (<= 16 nodes) two running and five in total.
+A `qsub` past that is refused with `would exceed queue generic's per-user limit`.
+
+How it launches: the script dumps a `monarch.job.PBSJob({"hosts": <nodes>})` and points
+`TORCHTITAN_MONARCH_JOB` at it; `python -m monarch._src.job._pbs_batch` starts one Monarch
+worker per node with Cray PALS `mpiexec` (`SlurmJob` uses `srun`) and runs
+`torchtitan.rl.train` as the client, which places the trainer and generators on the job's
+hosts.
+
+## A healthy run
+
+- every requested step logs a `Train | Step: N` line;
+- reward is non-zero from step 1 and there is no `untrainable batches` warning (zero
+  weights in the generators show up as reward 0 and untrainable batches);
+- `grad_norm` in the ranges below: LoRA about 0.02-0.5, full about 0.2-4 (full is taken
+  over all parameters; compare it only with full runs);
+- the `Mesh split` line in `train.log` shows the mesh you expect -- read the mesh from that
+  line, not from the requested flags.
 
 ## Reference results
 
-All on Aurora, launched with the scripts in `scripts/rl/xpu/` of this
-branch. "Byte-exact" means every TorchStore weight transfer was checksummed on
-both sides and matched (study-only hook, not part of the scripts).
+**Regression, 2026-10-14** (this branch, `grpo_regression` matrix): 1, 2, 8 and 16 nodes,
+1-12 tiles per node, both arms, 2 steps each -- all pass, including 16 nodes x 12 tiles.
+Cross-node FSDP variants: 5 of 6 pass (the full arm at `2 x 8` hangs).
+
+Deep-dive runs, 10 steps, 4 tiles per node (throughput is the median of steps 3-10):
+
+| Run | Nodes | Mesh | Steps | `fwd_bwd` tok/s | full step tok/s | grad_norm | mean reward |
+|-----|-------|------|-------|-----------------|-----------------|-----------|-------------|
+| Full | 1 | 1 x 2 | 10/10 | 2874 | 2191 | 0.20-2.55 | 0.28 |
+| LoRA | 1 | 1 x 2 | 10/10 | 3348 | 3060 | 0.04-0.50 | 0.26 |
+| Full | 8 | 4 x 4 | 10/10 | 2357 | 1933 | 0.17-2.84 | 0.27 |
+| LoRA | 8 | 4 x 4 | 10/10 | 5698 | 1774 | 0.02-0.46 | 0.27 |
+
+Long runs on the same stack (earlier launchers; "byte-exact" means every TorchStore
+weight transfer was checksummed on both sides, a study-only hook):
 
 | Run | Nodes | Steps | Result |
 |-----|-------|-------|--------|
-| Full, job 8904699 | 4 | 10 | 10/10, 352/352 transfers byte-exact |
-| LoRA, job 8904708 | 4 | 10 | 10/10, 697 transfers byte-exact |
-| Full, job 8905380 (`CCL_OP_SYNC` unset) | 8 | 200 | 200/200, 12819 transfers byte-exact, `fwd_bwd` 22063 tok/s, 12.6 s/step |
-| LoRA, job 8905381 (`CCL_OP_SYNC` unset) | 8 | 200 | 200/200, 51213 transfers byte-exact, `fwd_bwd` 45032 tok/s, 16.5 s/step |
+| Full, job 8905380 | 8 | 200 | 200/200, 12819 transfers byte-exact, `fwd_bwd` 22063 tok/s, 12.6 s/step |
+| LoRA, job 8905381 | 8 | 200 | 200/200, 51213 transfers byte-exact, `fwd_bwd` 45032 tok/s, 16.5 s/step |
 | Full, job 8904955 | 1 | 200 | 200/200, `fwd_bwd` 8716 tok/s, 13.3 s/step |
 | LoRA, job 8904956 | 1 | 200 | 200/200, `fwd_bwd` 11214 tok/s, 14.6 s/step |
 
-A run is healthy when all of these hold:
+## Environment setup
 
-- every requested step logs a `Train | Step: N` line;
-- no `untrainable batches` warning and reward is non-zero from step 1 (the
-  zero-weight failure below shows up as reward 0 and untrainable batches);
-- LoRA `grad_norm` stays in 0.04-0.15. Full GRPO's grad_norm is 3-5x higher
-  because it is taken over all parameters; compare it only with full runs;
-- the `Mesh split` log line shows the mesh you expect (read the mesh from that
-  line, not from the requested flags).
-
-## What changed from the torch 2.12 stack
-
-| | torch 2.12 | torch 2.14 (this guide) |
-|---|---|---|
-| torch / oneCCL / SYCL | 2.12.0+xpu / 2021.17.2 / 2025.3 | 2.14.0+xpu / 2022.1.1 / 2026.1.0 |
-| oneAPI env | oneAPI 2025.3 | oneAPI 2026.1 module + `ZE_FLAT_DEVICE_HIERARCHY=FLAT` (`env_torch214.sh`) |
-| RMSNorm `LD_PRELOAD` interposer | required for full GRPO | **not needed**: the stock kernel passes the 65536-row weight-grad backward |
-| vLLM | pinned old commit | upstream `main` |
-| `CCL_WORKER_AFFINITY` | set explicitly | **unset**: oneCCL 2022 aborts comm init on an explicit list (`unexpected worker affinity length`) |
-| `SYCL_UR_USE_LEVEL_ZERO_V2=1` | not set | set in all four launchers (see below) |
-| `CCL_OP_SYNC` | `=1` (part of the CXI tuning block) | **unset**: on oneCCL 2022 it makes cross-node all_reduce a silent no-op (see below) |
-| TorchStore storage volumes | inside the trainer processes | in their own processes (`storage_volumes_in_own_procs`, see below) |
-| first weight pull | all generators at once | one generator at a time (`sequential_initial_pull`) |
-
-### The two oneCCL bugs and the workarounds in this branch
-
-Both are filed upstream with standalone reproducers that use only the oneCCL C
-API (no PyTorch, TorchStore or torchtitan): [#222](https://github.com/uxlfoundation/oneCCL/issues/222) and [#225](https://github.com/uxlfoundation/oneCCL/issues/225).
-The first is a regression from oneCCL 2021.17.2; the second also happens on
-2021.17.2.
-
-1. **Cross-node broadcast silently moves no data** ([#222](https://github.com/uxlfoundation/oneCCL/issues/222)). oneCCL fixes
-   a process's position on the node when the process creates its first
-   communicator, and oneCCL 2022 now routes cross-node broadcasts through a
-   sub-group built from that position. A TorchStore storage volume living in an FSDP trainer process
-   inherits the FSDP group's position, so its later cross-node broadcasts from
-   tiles 1-3 return success and deliver nothing: the generators get zero
-   weights, reward drops to 0, and the controller logs untrainable batches.
-   **Workaround:** `Controller.Config.storage_volumes_in_own_procs=True` spawns
-   the volumes in a twin of the trainer mesh (same hosts, same tiles), whose
-   first communicator is a pull communicator.
-2. **Concurrent communicator creation fails** ([#225](https://github.com/uxlfoundation/oneCCL/issues/225)) in oneCCL's topology discovery
-   (`zesFabricPortGetConfig` -> `ZE_RESULT_ERROR_NOT_AVAILABLE`) when a volume
-   process builds several communicators at once. TorchStore creates its
-   communicators on a generator's first pull and caches them.
-   **Workaround:** `InterGeneratorRouter.Config.sequential_initial_pull=True`
-   runs that first pull one generator at a time. It costs tens of seconds once
-   (26-50 s at 4 nodes, 50-160 s at 8); later pulls stay concurrent.
-
-Both flags default to on when the device is XPU and off otherwise. A third
-oneCCL 2022 bug (a SIGSEGV once one process holds more than ~9 communicators on
-the scheduler path, [#224](https://github.com/uxlfoundation/oneCCL/issues/224)) is avoided because the default SYCL path is used; do not set
-`CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` or `CCL_ENABLE_SYCL_KERNELS=0`.
-
-**`CCL_OP_SYNC` must not be set.** On oneCCL 2022, `CCL_OP_SYNC=1` turns every
-cross-node `all_reduce` above 4 MiB into a no-op that reports success: each rank
-gets its own input back. Under FSDP2 HSDP (the full arm at 8 nodes runs `dp_replicate=4 x
-dp_shard=4`) the replicas then train independently on their own node's gradients,
-while loss, reward and grad_norm look normal. It also makes the gradient sync ~6x
-slower. Without it the reduction is exact and 8-node `fwd_bwd` is 23.5k tok/s
-(full) and 47.6k (LoRA), against 7.3k and 40.3k with it. A 2-rank standalone
-reproducer is in [#223](https://github.com/uxlfoundation/oneCCL/issues/223).
-
-**`SYCL_UR_USE_LEVEL_ZERO_V2=1`.** With the default (v1) Level Zero adapter,
-long runs abort intermittently with `ur_die: urEventWait must not be called for
-an internal event`, about once per 100-150 steps, in trainer and generator
-processes alike. The v2 adapter ran 200 steps clean in both arms at 1 and 8 nodes.
-This one is not root-caused; treat it as a workaround to remove once the v1
-adapter is fixed.
-
-## Prerequisites
+Build on the UAN (login node), never on a compute node. Prerequisites: Aurora access,
+miniforge3, the Qwen3-0.6B weights on a filesystem the compute nodes read, and the
+dataset cached once on the UAN (runs set `HF_HUB_OFFLINE=1`):
+`python -c "import datasets; datasets.load_dataset('kalomaze/alphabetic-arxiv-authors-it1', split='train')"`.
 
 ```bash
-export TORCHTITAN_DIR=$HOME/git/torchtitan
-export MONARCH_DIR=$HOME/git/monarch214
+export TORCHTITAN_DIR=$HOME/git/torchtitan    # this branch
+export MONARCH_DIR=$HOME/git/monarch
 export TORCHSTORE_DIR=$HOME/git/torchstore
 export VLLM_DIR=$HOME/git/vllm
 export CONDA_PREFIX_BASE=$HOME/miniforge3
-export HF_ASSETS_PATH=/flare/Aurora_deployment/intel/models/Qwen3-0.6B
 ```
 
-The launchers read `TORCHTITAN_DIR`, `CONDA_PREFIX_BASE`, `CONDA_ENV` (default
-`monarch_pbs`) and `ONEAPI_ENV_SCRIPT` (default
-`scripts/rl/xpu/env_torch214.sh`), all with the defaults above. `HF_ASSETS_PATH` is overridable the
-same way.
-
-- Aurora access: the UAN (login node) for builds, compute nodes for runs.
-- Conda (miniforge3).
-- Qwen3-0.6B weights on a filesystem the compute nodes can read.
-- The alphabet-sort dataset pre-cached: runs set `HF_HUB_OFFLINE=1`, so on the
-  UAN (which has internet) run once:
-  `python -c "import datasets; datasets.load_dataset('kalomaze/alphabetic-arxiv-authors-it1', split='train')"`.
-
-## Repositories
-
-| Repo | Branch | Commit | Notes |
-|------|--------|--------|-------|
-| torchtitan | this branch | see branch | this guide |
+| Repo | Branch | Commit | Contents |
+|------|--------|--------|----------|
+| torchtitan | this branch | -- | this guide |
+| monarch | `int/xpu-pbs` (github.com/songhappy/monarch) | `5009e95d5` | upstream `main` `5283c8570` + PR #4307 (XPU actor runtime) + `monarch.job.PBSJob` |
 | torchstore | `xpu-all` (github.com/songhappy/torchstore) | `1ebced4` | PR #171 (XCCL transport) + replica dedup |
-| monarch | `xpu-upstream` `7761764a` (PR #4307) + upstream `d9fc48862` cherry-picked | see note | `d9fc48862` makes `default_bootstrap_cmd` public, which torchtitan imports |
 | vLLM | upstream `main` | `083060d04` | no local patches |
-
-## Environment setup
-
-Build on the UAN, never on a compute node. This recipe was reconstructed from
-the build logs of the reference environment; please report any step that does
-not reproduce.
 
 ### 1. Conda env and toolchain
 
 ```bash
-source $TORCHTITAN_DIR/scripts/rl/xpu/env_torch214.sh   # oneAPI 2026.1 + gcc 14.3
-$CONDA_PREFIX_BASE/bin/conda create -n monarch214 python=3.12 -y
-eval "$($CONDA_PREFIX_BASE/bin/conda shell.bash hook)"
-conda activate monarch214
+source $TORCHTITAN_DIR/scripts/rl/xpu/env_torch214.sh   # oneAPI 2026.1, gcc 14.3
+$CONDA_PREFIX_BASE/bin/conda create -n monarch_pbs python=3.12 -y   # the launcher's CONDA_ENV
+eval "$($CONDA_PREFIX_BASE/bin/conda shell.bash hook)" && conda activate monarch_pbs
 conda install -y -c conda-forge rust=1.97.1
 ```
 
-Never source a oneAPI 2025.x environment in the same shell: torch 2.14 ships
-the 2026.1 SYCL runtime, and two SYCL runtimes in one process segfault.
+Never source a oneAPI 2025.x environment in the same shell: torch 2.14 ships the 2026.1
+SYCL runtime, and two SYCL runtimes in one process segfault.
 
-### 2. torch, Triton and the vLLM XPU kernels (from vLLM's pins)
+### 2. torch, Triton and the vLLM XPU kernels
 
 vLLM `main` pins the matching set in `requirements/xpu.txt` (`torch==2.14.0`,
 `triton==3.8.0+xpu`, `vllm_xpu_kernels==0.1.15.4`):
@@ -166,136 +172,145 @@ vLLM `main` pins the matching set in `requirements/xpu.txt` (`torch==2.14.0`,
 ```bash
 cd $VLLM_DIR && git checkout 083060d04
 pip install -r requirements/xpu.txt \
-    --extra-index-url https://download.pytorch.org/whl/xpu \
-    --extra-index-url https://wheels.vllm.ai/xpu/
-python -c "import torch; print(torch.__version__, torch.xpu.is_available())"
+    --extra-index-url https://download.pytorch.org/whl/xpu --extra-index-url https://wheels.vllm.ai/xpu/
+python -c "import torch; print(torch.__version__)"   # 2.14.0+xpu (xpu.is_available() is False on a UAN)
 ```
 
-On the UAN `torch.xpu.is_available()` is False (no GPUs there); the version must
-be `2.14.0+xpu`.
-
-If `import triton.language` later fails with `module 'triton' has no attribute
-'language'`, another package's `triton` install deleted files that `triton-xpu`
-owns: `pip install --force-reinstall --no-deps triton-xpu==3.8.0`.
+If `import triton.language` later fails (`module 'triton' has no attribute 'language'`),
+another package's `triton` overwrote `triton-xpu`:
+`pip install --force-reinstall --no-deps triton-xpu==3.8.0`.
 
 ### 3. vLLM
 
 ```bash
-cd $VLLM_DIR
-VLLM_TARGET_DEVICE=xpu VLLM_REQUIRE_RUST_FRONTEND=1 \
+cd $VLLM_DIR && VLLM_TARGET_DEVICE=xpu VLLM_REQUIRE_RUST_FRONTEND=1 \
     pip install -e . --no-deps --no-build-isolation -v
 ```
 
-`VLLM_REQUIRE_RUST_FRONTEND=1` (needs `cargo` from step 1) makes a missing Rust
-toolchain an error instead of silently dropping `_rust_tool_parser`.
+`VLLM_REQUIRE_RUST_FRONTEND=1` makes a missing `cargo` an error instead of silently
+dropping `_rust_tool_parser`.
 
 ### 4. Monarch
 
 ```bash
-cd $MONARCH_DIR && git checkout 7761764a && git cherry-pick d9fc48862   # PR #4307 + upstream #4327
+cd $MONARCH_DIR && git checkout int/xpu-pbs
 GCC=$(dirname $(which gcc))
+LLVM=/opt/aurora/26.181.0/spack/unified/1.1.1/install/linux-x86_64/llvm-develop-git.87717bf-7gy6r7k
 RUSTC_BOOTSTRAP=1 USE_TENSOR_ENGINE=0 \
 PROTOC=$CONDA_PREFIX/lib/python3.12/site-packages/torch/bin/protoc \
 CC=$GCC/gcc CXX=$GCC/g++ CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=1" \
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=$GCC/gcc \
+LIBCLANG_PATH=$LLVM/lib BINDGEN_EXTRA_CLANG_ARGS="-I$LLVM/lib/clang/23/include" \
     pip install -e . --no-deps --no-build-isolation
 pip install pyzmq pyarrow requests numpy pyre-extensions "typing-extensions>=4.12" \
-    cloudpickle lark tabulate opentelemetry-api clusterscope "flask>=2.0" \
-    xxhash py-spy aiohttp
-python -c "from monarch.actor import Actor, default_bootstrap_cmd; import monarch._rust_bindings"
+    cloudpickle lark tabulate opentelemetry-api clusterscope "flask>=2.0" xxhash py-spy aiohttp
+python -c "from monarch.actor import Actor; from monarch.job import PBSJob; import monarch._rust_bindings"
 ```
 
-Why each variable: `USE_TENSOR_ENGINE=0` builds only the actor runtime the RL
-stack uses; `RUSTC_BOOTSTRAP=1` lets stable rustc accept the nightly-only flags
-`setup.py` passes; `PROTOC` points at the `protoc` torch bundles; `CC/CXX` must
-be GNU gcc (the oneAPI env sets `CC=icx`, whose intrinsics GNU `ld` cannot
-link); and the cargo linker override replaces conda's
-`x86_64-conda-linux-gnu-cc`, whose old sysroot lacks the glibc 2.38 symbols
-`aws-lc-sys` emits.
+Why: `USE_TENSOR_ENGINE=0` builds only the actor runtime RL uses; `RUSTC_BOOTSTRAP=1` lets
+stable rustc take the nightly flags `setup.py` passes; `PROTOC` is the one torch bundles;
+`CC`/`CXX` must be GNU gcc (the oneAPI env sets `CC=icx`, whose intrinsics GNU `ld` cannot
+link); the cargo linker override replaces conda's `x86_64-conda-linux-gnu-cc`, whose
+sysroot lacks the glibc 2.38 symbols `aws-lc-sys` needs; `LIBCLANG_PATH` and
+`BINDGEN_EXTRA_CLANG_ARGS` let `libsqlite3-sys` (upstream telemetry) find libclang.
 
 ### 5. TorchStore
 
 ```bash
 git clone -b xpu-all https://github.com/songhappy/torchstore.git $TORCHSTORE_DIR
 cd $TORCHSTORE_DIR && git checkout 1ebced4
-pip install -e . --no-deps --no-build-isolation
-pip install pygtrie portpicker
+pip install -e . --no-deps --no-build-isolation && pip install pygtrie portpicker
 ```
 
 `--no-deps` because TorchStore pins an older `torchmonarch`.
 
-### 6. TorchTitan and training deps
-
-```bash
-cd $TORCHTITAN_DIR   # this branch checked out
-pip install torchdata==0.11.0 spmd_types==0.2.5 tyro==1.0.15 einops tensorboard \
-    "git+https://github.com/PrimeIntellect-ai/renderers.git@main" \
-    --constraint <(echo "torch==2.14.0+xpu")
-```
-
-TorchTitan runs from the source tree (the launchers `cd` into
-`$TORCHTITAN_DIR`); it does not need to be pip-installed. The `--constraint`
-keeps pip from replacing the XPU torch.
-
-### Version summary (reference environment)
-
-| Package | Version |
-|---------|---------|
-| python | 3.12.13 |
-| torch | 2.14.0+xpu |
-| triton / triton-xpu | 3.8.0+xpu / 3.8.0 |
-| oneccl | 2022.1.1 |
-| intel-sycl-rt | 2026.1.0 |
-| vllm | 0.30.1rc1.dev523+g083060d04.xpu (editable) |
-| vllm-xpu-kernels | 0.1.15.4 |
-| torchmonarch | 0.6.0.dev0 (editable) |
-| torchstore | 0.0.0.dev0 (editable) |
-| transformers | 5.18.0 |
-| datasets | 4.7.0 |
-| renderers | 0.1.11 |
-| tyro | 1.0.15 |
-| spmd_types | 0.2.5 |
-| torchdata | 0.11.0 |
-
-## Running
-
-One PBS script, `scripts/rl/xpu/run_grpo.sh`, runs `torchtitan.rl.train` on any
-node count. Overrides are environment variables (forward them with `qsub -v`):
+### 6. TorchTitan deps
 
 ```bash
 cd $TORCHTITAN_DIR
-ln -s /flare/Aurora_deployment/intel/models/Qwen3-0.6B torchtitan/rl/example_checkpoint/Qwen3-0.6B
-qsub -l select=1 -v ARM=lora scripts/rl/xpu/run_grpo.sh                 # 2 trainer + 2 generator tiles
-qsub -l select=8 -q debug-scaling -v ARM=full,PPN=4 scripts/rl/xpu/run_grpo.sh
-qsub -l select=8 -l walltime=04:00:00 -q capacity -v NUM_STEPS=200 scripts/rl/xpu/run_grpo.sh
+pip install torchdata==0.11.0 spmd_types==0.2.5 tyro==1.0.15 einops tensorboard \
+    "git+https://github.com/PrimeIntellect-ai/renderers.git@main" --constraint <(echo "torch==2.14.0+xpu")
 ```
 
-It uses Monarch's `PBSJob` the way `SlurmJob` batch mode is used: the script dumps a
-`PBSJob({"hosts": <nodes>})` and points `TORCHTITAN_MONARCH_JOB` at it, then
-`python -m monarch._src.job._pbs_batch` starts one Monarch worker per node with Cray
-PALS `mpiexec` (`SlurmJob` uses `srun`) and runs `torchtitan.rl.train` as the client,
-which takes its hosts from the job: the trainer the first nodes, generators the rest.
+TorchTitan runs from the source tree and is not pip-installed; the constraint keeps pip
+from replacing the XPU torch.
 
-Overrides: `ARM` (full/lora), `PPN`, `NUM_STEPS` (2, 10 or 200),
-`CONFIG`, `DUMP_FOLDER`, `LOG`, `MPIEXEC`, `EXTRA_ARGS`. Logs: `$DUMP_FOLDER/train.log`.
+### Reference versions
+
+| Package | Version | Package | Version |
+|---------|---------|---------|---------|
+| python | 3.12.13 | torchmonarch | 0.8.0.dev0 (editable) |
+| torch | 2.14.0+xpu | torchstore | 0.0.0.dev0 (editable) |
+| triton-xpu | 3.8.0 | transformers | 5.18.0 |
+| oneccl | 2022.1.1 | datasets | 4.7.0 |
+| intel-sycl-rt | 2026.1.0 | renderers | 0.1.11 |
+| vllm | 0.30.1rc1.dev523+g083060d04.xpu (editable) | tyro | 1.0.15 |
+| vllm-xpu-kernels | 0.1.15.4 | spmd_types / torchdata | 0.2.5 / 0.11.0 |
+
+## XPU settings and why
+
+**oneCCL workarounds in the code.** Two oneCCL bugs, filed with standalone C reproducers,
+are worked around by config fields that default to on when the device is XPU:
+
+1. **Cross-node broadcast moves no data** ([#222](https://github.com/uxlfoundation/oneCCL/issues/222),
+   a regression from oneCCL 2021.17.2). oneCCL fixes a process's position on the node at its
+   first communicator and routes later cross-node broadcasts through a sub-group built from
+   it. A TorchStore storage volume inside an FSDP trainer process inherits the FSDP position,
+   so its broadcasts from tiles 1-3 succeed and deliver nothing: zero weights, reward 0.
+   `Controller.Config.storage_volumes_in_own_procs` runs the volumes in a twin of the
+   trainer mesh (same hosts and tiles) whose first communicator is a weight-pull one.
+2. **Concurrent communicator creation fails** ([#225](https://github.com/uxlfoundation/oneCCL/issues/225))
+   in topology discovery (`zesFabricPortGetConfig` -> `ZE_RESULT_ERROR_NOT_AVAILABLE`).
+   `InterGeneratorRouter.Config.sequential_initial_pull` runs the first weight pull one
+   generator at a time (26-160 s once, at 4-8 nodes); later pulls stay concurrent.
+
+A third bug, a SIGSEGV past ~9 communicators per process on the scheduler path
+([#224](https://github.com/uxlfoundation/oneCCL/issues/224)), is avoided by the default SYCL
+path: do not set `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` or `CCL_ENABLE_SYCL_KERNELS=0`.
+
+**Environment the launcher sets, and why:**
+
+| Setting | Why |
+|---------|-----|
+| `CCL_OP_SYNC` unset | on oneCCL 2022 it turns cross-node `all_reduce` above 4 MiB into a silent no-op ([#223](https://github.com/uxlfoundation/oneCCL/issues/223)): HSDP replicas then train apart while the metrics look normal |
+| `CCL_WORKER_AFFINITY` unset | oneCCL 2022 aborts communicator init on an explicit list |
+| `CCL_SYCL_SCALEOUT_HOST_BUF_SIZE=256 MiB` | each weight-pull communicator holds this host buffer; the default 2 GiB fills host memory at 12 tiles per node |
+| `SYCL_UR_USE_LEVEL_ZERO_V2=1` | the v1 Level Zero adapter aborts about once per 100-150 steps (`urEventWait must not be called for an internal event`); not root-caused |
+| `ZE_FLAT_DEVICE_HIERARCHY=FLAT` (`env_torch214.sh`) | one device per tile; the oneAPI 2026.1 module sets COMPOSITE |
+| no `TORCHINDUCTOR_CACHE_DIR` | the compile cache stays under `$TMPDIR=/tmp`, per node; a cache on `/home` shared by all nodes races (see [Known issues](#known-issues)) |
+| `TMPDIR=/tmp` | PBS's `TMPDIR` exists only on the head node |
+| `unset HOSTNAME` | otherwise every node looks local to TorchStore |
+| `mpiexec --cpu-bind=none` | PALS otherwise pins each worker and every process it forks to one core |
+| `ulimit -c 0` | every teardown aborts and would write ~10 GB of core per process |
+
+Compared with the earlier torch 2.12 stack: oneAPI 2026.1 instead of 2025.3, oneCCL 2022
+instead of 2021.17, vLLM upstream `main` instead of a pinned commit, and the RMSNorm
+`LD_PRELOAD` interposer is no longer needed (the stock kernel passes the 65536-row
+weight-grad backward).
 
 ## Known issues
 
-- **Teardown hangs after the last step.** `qdel` the job once the final
-  `Train | Step` line appears; PBS then reports a walltime exit for a run that
-  succeeded. Teardown also aborts with core dumps of ~10 GB per process, which
-  is why the launchers set `ulimit -c 0`.
-- **Monarch startup flake**: `cast.service ... actor does not exist` before any
-  step. Intermittent; resubmit.
-- **vLLM "not enough free memory" at startup with 0 steps** is a phantom from
-  Level Zero's lagging memory report; resubmit before changing
-  `gpu_memory_limit`.
-- **Checkpoint saving is off** (`load_only=True` in the recipe): the DCP save
-  ran out of device memory inside oneCCL at 8 nodes. Never disable the
-  checkpointer to avoid saves; that also skips loading the pretrained weights.
-- **vLLM TP=2 SIGSEGVs at process exit** on this stack, after finishing its
-  work. Not hit by the TP=1 generators these configs use.
-- **Keep the inductor cache node-local.** `run_grpo.sh` leaves it under `$TMPDIR`
-  (`/tmp`). One cache on `/home` shared by all nodes races: at 16 nodes a trainer rank
-  intermittently fails to compile flex attention (`@jit functions should be defined in a
-  Python file`) and the other ranks then wait in FSDP collectives until walltime.
+- **Teardown hangs after the last step.** `qdel` the job once the final `Train | Step` line
+  appears; PBS then reports a walltime exit for a run that succeeded.
+- **Full GRPO hangs at `dp_replicate=2 x dp_shard=8` on 4 trainer nodes**
+  (`..._full_8n_ppn4_rep2_2steps`, seen 2026-10-14). All 16 trainer ranks stop inside the
+  first `forward_backward`, with no error, until walltime. LoRA passes on the same layout,
+  and full GRPO passes with one copy sharded across nodes (`dp_replicate=1`) and with one
+  copy per node. It is the only layout where gradients cross nodes in both the shard-group
+  reduce-scatter and the replica all-reduce. Under investigation; use `dp_replicate=1` or
+  one copy per node.
+- **A hung run with no error in `train.log`** usually means one trainer rank raised and the
+  others wait in FSDP collectives. The exception is only in that rank's structured log:
+  `grep -l forward_backward_error $DUMP_FOLDER/structured_logs/rl_trainer*`.
+- **Never point `TORCHINDUCTOR_CACHE_DIR` at `/home`.** With one cache shared by all nodes,
+  at 16 nodes a trainer rank intermittently fails to compile flex attention (`@jit functions
+  should be defined in a Python file`) and the run hangs as above.
+- **Monarch startup flake**: `cast.service ... actor does not exist` before any step.
+  Intermittent; resubmit.
+- **vLLM "not enough free memory" at startup, 0 steps**: a phantom of Level Zero's lagging
+  memory report. Resubmit before changing `gpu_memory_limit`.
+- **Checkpoint saving is off** (`load_only=True` in the recipe): the DCP save ran out of
+  device memory inside oneCCL at 8 nodes. Do not disable the checkpointer instead; that also
+  skips loading the pretrained weights.
+- **vLLM TP=2 SIGSEGVs at process exit** on this stack. The TP=1 generators these configs
+  use do not hit it.
