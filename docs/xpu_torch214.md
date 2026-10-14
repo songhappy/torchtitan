@@ -110,18 +110,24 @@ hosts.
 
 ## Reference results
 
-**Regression, 2026-10-14** (this branch, `grpo_regression` matrix): 1, 2, 8 and 16 nodes,
-1-12 tiles per node, both arms, 2 steps each -- all pass, including 16 nodes x 12 tiles.
-Cross-node FSDP variants: 5 of 6 pass (the full arm at `2 x 8` hangs).
+**Regression, 2026-10-14** (`grpo_regression` skill, `sweep.sh basic`, on torchtitan `5ae08f010`, Monarch
+`xpu-all` `5009e95d5`, TorchStore `xpu-all` `2afb113`): 18/18 pass --
 
-Deep-dive runs, 10 steps, 4 tiles per node (throughput is the median of steps 3-10):
+- 2 nodes x 1, 2, 4, 8, 12 tiles, full and LoRA (the whole trainer on one node);
+- 16 nodes x 4 and 12 tiles, full and LoRA, one model copy per trainer node (`8 x 4`, `8 x 12`);
+- the four 10-step runs below.
+
+FSDP across nodes, same day: `1 x 8` (4 nodes) and `1 x 16` (8 nodes) pass in both arms, `2 x 8`
+(8 nodes) passes with LoRA and hangs with full GRPO (see [Known issues](#known-issues)).
+
+10-step runs, 4 tiles per node (throughput is the median of steps 3-10):
 
 | Run | Nodes | Mesh | Steps | `fwd_bwd` tok/s | full step tok/s | grad_norm | mean reward |
 |-----|-------|------|-------|-----------------|-----------------|-----------|-------------|
-| Full | 1 | 1 x 2 | 10/10 | 2874 | 2191 | 0.20-2.55 | 0.28 |
-| LoRA | 1 | 1 x 2 | 10/10 | 3348 | 3060 | 0.04-0.50 | 0.26 |
-| Full | 8 | 4 x 4 | 10/10 | 2357 | 1933 | 0.17-2.84 | 0.27 |
-| LoRA | 8 | 4 x 4 | 10/10 | 5698 | 1774 | 0.02-0.46 | 0.27 |
+| Full | 1 | 1 x 2 | 10/10 | 2712 | 2412 | 0.16-2.92 | 0.29 |
+| LoRA | 1 | 1 x 2 | 10/10 | 3038 | 2714 | 0.05-0.38 | 0.28 |
+| Full | 8 | 4 x 4 | 10/10 | 2322 | 2097 | 0.26-2.23 | 0.30 |
+| LoRA | 8 | 4 x 4 | 10/10 | 5895 | 1469 | 0.04-0.28 | 0.28 |
 
 Long runs on the same stack (earlier launchers; "byte-exact" means every TorchStore
 weight transfer was checksummed on both sides, a study-only hook):
@@ -152,7 +158,7 @@ export CONDA_PREFIX_BASE=$HOME/miniforge3
 |------|--------|--------|----------|
 | torchtitan | this branch | -- | this guide |
 | monarch | `xpu-all` (github.com/songhappy/monarch) | `5009e95d5` | upstream `main` `5283c8570` + PR #4307 (XPU actor runtime) + the `monarch.job.PBSJob` PR (`pbs-job`) |
-| torchstore | `xpu-all` (github.com/songhappy/torchstore) | `1ebced4` | PR #171 (XCCL transport) + replica dedup |
+| torchstore | `xpu-all` (github.com/songhappy/torchstore) | `2afb113` | PR #171 (XCCL transport) + PR #201 (replicated regions fetched once, spread over replicas) |
 | vLLM | upstream `main` | `083060d04` | no local patches |
 
 ### 1. Conda env and toolchain
@@ -222,7 +228,7 @@ sysroot lacks the glibc 2.38 symbols `aws-lc-sys` needs; `LIBCLANG_PATH` and
 
 ```bash
 git clone -b xpu-all https://github.com/songhappy/torchstore.git $TORCHSTORE_DIR
-cd $TORCHSTORE_DIR && git checkout 1ebced4
+cd $TORCHSTORE_DIR && git checkout 2afb113
 pip install -e . --no-deps --no-build-isolation && pip install pygtrie portpicker
 ```
 
