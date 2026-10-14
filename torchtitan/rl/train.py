@@ -41,10 +41,9 @@ from torchtitan.config import ConfigLoader
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl._runtime import is_xpu_launch_env
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.tools.utils import device_module
+from torchtitan.tools.utils import device_module, device_type
 
 
 logger = logging.getLogger(__name__)
@@ -55,7 +54,7 @@ MONARCH_JOB_ENV = "TORCHTITAN_MONARCH_JOB"
 
 def _device_visibility_env() -> str:
     """The env var that restricts which accelerators a spawned proc can see."""
-    return "ZE_AFFINITY_MASK" if is_xpu_launch_env() else "CUDA_VISIBLE_DEVICES"
+    return "ZE_AFFINITY_MASK" if device_type == "xpu" else "CUDA_VISIBLE_DEVICES"
 
 
 def _preimport_torch() -> None:

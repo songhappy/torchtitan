@@ -11,10 +11,12 @@ from unittest.mock import patch
 
 import pytest
 
+from torchtitan.rl import train
 from torchtitan.rl.train import PerHostProvisioner
 
 
-def test_allocate_partitions_cuda_devices() -> None:
+def test_allocate_partitions_cuda_devices(monkeypatch) -> None:
+    monkeypatch.setattr(train, "device_type", "cuda")
     with patch.dict(os.environ, {}, clear=True):
         provisioner = PerHostProvisioner(total_gpus=4)
 
@@ -22,8 +24,9 @@ def test_allocate_partitions_cuda_devices() -> None:
         assert provisioner.allocate(2) == {"CUDA_VISIBLE_DEVICES": "2,3"}
 
 
-def test_allocate_partitions_xpu_devices() -> None:
-    with patch.dict(os.environ, {"ZE_AFFINITY_MASK": "0,1,2,3"}, clear=True):
+def test_allocate_partitions_xpu_devices(monkeypatch) -> None:
+    monkeypatch.setattr(train, "device_type", "xpu")
+    with patch.dict(os.environ, {}, clear=True):
         provisioner = PerHostProvisioner(total_gpus=4)
 
         assert provisioner.allocate(2) == {"ZE_AFFINITY_MASK": "0,1"}

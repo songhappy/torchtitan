@@ -32,7 +32,7 @@ RL_ENV_DEFAULTS: dict[str, str] = {
 XPU_LAUNCH_ENV = "ZE_AFFINITY_MASK"
 
 
-def is_xpu_launch_env() -> bool:
+def _is_xpu_launch_env() -> bool:
     """Whether this process was launched against XPU accelerators."""
     return XPU_LAUNCH_ENV in os.environ
 
@@ -40,7 +40,7 @@ def is_xpu_launch_env() -> bool:
 def apply_env_defaults() -> None:
     """Apply TorchTitan RL defaults without replacing existing values."""
     defaults = dict(RL_ENV_DEFAULTS)
-    if is_xpu_launch_env():
+    if _is_xpu_launch_env():
         # torch's XPU allocator reads the same two variables, and expandable
         # segments invalidate the USM pointers oneCCL registers for collectives,
         # so weight-sync transfers return corrupt data. An explicit user value is
