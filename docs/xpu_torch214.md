@@ -339,6 +339,8 @@ weight-grad backward).
   generator is vLLM's TP group, so the later cross-node weight broadcasts to tiles 1+ move nothing.
   On 1 node (shared-memory pull) `_gtp2` passes. Workaround: `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`
   (2n and 8n `_gtp2` pass with it); the default configs use single-tile generators.
+- **vLLM with TP > 1 dumps core at process exit** (plain vLLM TP2/TP4, re-seen 2026-10-15) after
+  generating correctly; run from a directory with room for the cores, or `ulimit -c 0`.
 - Seen with the older Monarch build, not in the 78 runs since the move to Monarch `main`
   + `PBSJob`: a startup flake `cast.service ... actor does not exist`, and a vLLM "not
   enough free memory" abort at startup (a phantom of Level Zero's lagging memory report).
