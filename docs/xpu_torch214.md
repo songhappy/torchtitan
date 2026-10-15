@@ -339,7 +339,7 @@ weight-grad backward).
   at 2 and 8 nodes). oneCCL fixes a process's tile index at its first communicator, which in a TP
   generator is vLLM's TP group, so the later cross-node weight broadcasts to tiles 1+ move nothing.
   On 1 node (shared-memory pull) `_gtp2` passes. `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` makes 2n
-  and 8n `_gtp2` pass (set it in the environment you submit from), but it selects the scheduler path of
+  and 8n `_gtp2` pass (add it to `qsub -v`, e.g. `-v ARM=full,GEN_TP=2,CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`), but it selects the scheduler path of
   #224 (below), so it is not a launcher default until it passes a full regression; the default configs
   use single-tile generators.
 - **vLLM with TP > 1 dumps core at process exit** (plain vLLM TP2/TP4, re-seen 2026-10-15) after
