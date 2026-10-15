@@ -63,6 +63,10 @@ on 4 or more nodes also has `_rep1` and `_rep2` variants (select them with
 | `rl_grpo_qwen3_0_6b_{full,lora}_8n_ppn4_rep1_2steps` | 8 | 1 x 16 | 4 |
 | `rl_grpo_qwen3_0_6b_{full,lora}_8n_ppn4_rep2_2steps` | 8 | 2 x 8 | 2 (full arm hangs, see [Known issues](#known-issues)) |
 
+`_gtp<T>` variants (select with `GEN_TP=<T>`) spread each vLLM generator over T tiles, e.g.
+`rl_grpo_qwen3_0_6b_full_2n_ppn4_gtp2_2steps`. Across nodes they need a oneCCL setting (see
+[Known issues](#known-issues)).
+
 ## Running
 
 `scripts/rl/xpu/run_grpo.sh` is one PBS script for every node count. Submit it from the
@@ -129,15 +133,18 @@ FSDP across nodes, same day: `1 x 8` (4 nodes) and `1 x 16` (8 nodes) pass in bo
 | Full | 8 | 4 x 4 | 10/10 | 2322 | 2097 | 0.26-2.23 | 0.30 |
 | LoRA | 8 | 4 x 4 | 10/10 | 5895 | 1469 | 0.04-0.28 | 0.28 |
 
-Long runs on the same stack (earlier launchers; "byte-exact" means every TorchStore
-weight transfer was checksummed on both sides, a study-only hook):
+200-step runs, 2026-10-15, same code and layouts (throughput is the median of steps 3-200; reward is
+the mean of the first / last 10 steps):
 
-| Run | Nodes | Steps | Result |
-|-----|-------|-------|--------|
-| Full, job 8905380 | 8 | 200 | 200/200, 12819 transfers byte-exact, `fwd_bwd` 22063 tok/s, 12.6 s/step |
-| LoRA, job 8905381 | 8 | 200 | 200/200, 51213 transfers byte-exact, `fwd_bwd` 45032 tok/s, 16.5 s/step |
-| Full, job 8904955 | 1 | 200 | 200/200, `fwd_bwd` 8716 tok/s, 13.3 s/step |
-| LoRA, job 8904956 | 1 | 200 | 200/200, `fwd_bwd` 11214 tok/s, 14.6 s/step |
+| Run | Nodes | Mesh | Steps | `fwd_bwd` tok/s | full step tok/s | grad_norm | mean reward |
+|-----|-------|------|-------|-----------------|-----------------|-----------|-------------|
+| Full | 1 | 1 x 2 | 200/200 | 2801 | 2370 | 0.08-2.02 | 0.29 -> 0.41 |
+| LoRA | 1 | 1 x 2 | 200/200 | 3495 | 2180 | 0.01-0.40 | 0.26 -> 0.39 |
+| Full | 8 | 4 x 4 | 200/200 | 2302 | 1702 | 0.06-1.94 | 0.28 -> 0.41 |
+| LoRA | 8 | 4 x 4 | 200/200 | 5976 | 1655 | 0.007-0.29 | 0.26 -> 0.42 |
+
+Earlier 200-step runs on 8 nodes checksummed every TorchStore weight transfer on both sides
+(a study-only hook): all 12819 (full) and 51213 (LoRA) transfers were byte-exact.
 
 ## Environment setup
 
@@ -326,8 +333,12 @@ weight-grad backward).
 - **Checkpoint saving is off** (`load_only=True` in the recipe): on the torch 2.12 stack the
   DCP save ran out of device memory inside oneCCL at 8 nodes; not re-tested on 2.14. Do not
   disable the checkpointer instead; that also skips loading the pretrained weights.
-- **vLLM TP=2 SIGSEGVs at process exit** (seen 2026-10-01 on this stack, not re-tested).
-  The TP=1 generators these configs use do not hit it.
+- **Generators with TP > 1 across nodes load garbage weights** (oneCCL #222): every completion is
+  `!!!!`, every reward 0, and the run stops after 10 untrainable batches (2026-10-15, `_gtp2`/`_gtp4`
+  at 2 and 8 nodes). oneCCL fixes a process's tile index at its first communicator, which in a TP
+  generator is vLLM's TP group, so the later cross-node weight broadcasts to tiles 1+ move nothing.
+  On 1 node (shared-memory pull) `_gtp2` passes. Workaround: `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`
+  (2n and 8n `_gtp2` pass with it); the default configs use single-tile generators.
 - Seen with the older Monarch build, not in the 78 runs since the move to Monarch `main`
   + `PBSJob`: a startup flake `cast.service ... actor does not exist`, and a vLLM "not
   enough free memory" abort at startup (a phantom of Level Zero's lagging memory report).
