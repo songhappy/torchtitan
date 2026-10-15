@@ -303,13 +303,20 @@ weight-grad backward).
 - **A finished run exits with status 1.** Teardown aborts after the last `Train | Step` line
   (verified 2026-10-14 at 1 and 8 nodes: the job ends by itself within a minute). Judge a run
   by its step lines, not by the PBS exit status.
-- **Cross-node FSDP: full GRPO hangs at `dp_replicate=2 x dp_shard=8`** on 4 trainer
-  nodes (`..._full_8n_ppn4_rep2_2steps`, seen 2026-10-14). All 16 trainer ranks stop inside the
-  first `forward_backward`, with no error, until walltime. LoRA passes on the same layout,
-  and full GRPO passes with one copy sharded across nodes (`dp_replicate=1`) and with one
-  copy per node. It is the only layout where gradients cross nodes in both the shard-group
-  reduce-scatter and the replica all-reduce. Under investigation; use `dp_replicate=1` or
-  one copy per node.
+- **Cross-node FSDP with 2 copies hangs.** `dp_replicate=2` with each copy spanning nodes stops in
+  the first `forward_backward`, no error, until walltime: 8n `2 x 8` (full; LoRA passed) and 16n
+  `2 x 16` (both arms), seen 2026-10-14. One copy across all trainer nodes (`1 x 16`, `1 x 32`)
+  passes. All trainer ranks wait in FSDP's backward all-gather (TorchStore is idle). It reproduces in
+  plain PyTorch FSDP2 (no RL) while raw collectives on the same mesh pass, so it is in FSDP2's HSDP
+  path on XPU. Use `dp_replicate=1` or one copy per node.
+- **One copy over 96 tiles (`1 x 96`, 16n x 12) is at the edge.** Each generator opens one
+  communicator per volume shard: host memory reached 966 GB (88% of a node) with LoRA, and full
+  GRPO failed its first pull in TorchStore's handshake (`onecclCommInitRank failed with code 11`),
+  seen 2026-10-15. `1 x 32` and one copy per node are fine.
+- **The first weight pull grows with `dp_shard`.** Each generator opens one communicator per volume
+  shard, and the first pull runs one generator at a time (oneCCL #225): at 16n x 12 tiles a
+  generator takes ~8 s at `8 x 12`, ~21 s at `2 x 48`, ~40 s at `1 x 96` -- an hour for 96
+  generators. Give such runs a long walltime.
 - **A hung run with no error in `train.log`** usually means one trainer rank raised and the
   others wait in FSDP collectives. The exception is only in that rank's structured log:
   `grep -l forward_backward_error $DUMP_FOLDER/structured_logs/rl_trainer*`.
