@@ -16,7 +16,7 @@
 # DP_REPLICATE=<R> runs the _rep<R> variant (FSDP across nodes), e.g. 8 nodes:
 #   qsub -l select=8 -v ARM=full,PPN=4,NUM_STEPS=2,DP_REPLICATE=1 scripts/rl/xpu/run_grpo.sh
 # GEN_TP=<T> spreads each vLLM generator over T tiles (the _gtp<T> variant).
-# Overridable: ARM PPN NUM_STEPS DP_REPLICATE GEN_TP CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
+# Overridable: ARM PPN NUM_STEPS DP_REPLICATE GEN_TP MODULE CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
 
 # The checkout qsub ran from (cd there first), so a second clone runs its own code.
 TORCHTITAN_DIR=${TORCHTITAN_DIR:-${PBS_O_WORKDIR:-$HOME/git/torchtitan}}
@@ -29,6 +29,7 @@ PPN=${PPN:-4}
 NUM_STEPS=${NUM_STEPS:-10}
 MPIEXEC=${MPIEXEC:-/opt/cray/pals/1.8/bin/mpiexec}  # PALS, not Intel MPI's Hydra
 EXTRA_ARGS=${EXTRA_ARGS:-}  # qsub passes no script args; extra flags go through here
+MODULE=${MODULE:-torchtitan_recipes.rl.alphabet_sort}  # the recipe module CONFIG is read from
 mapfile -t NODES < <(sed 's/\..*//' "${PBS_NODEFILE:?run inside a PBS job}" | awk '!seen[$0]++')
 NUM_NODES=${#NODES[@]}
 CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}${DP_REPLICATE:+_rep$DP_REPLICATE}${GEN_TP:+_gtp$GEN_TP}_${NUM_STEPS}steps}
@@ -49,6 +50,9 @@ export CCL_ALLREDUCE_SCALEOUT=direct CCL_BCAST=double_tree
 # Per-communicator host buffer; the weight pull keeps PPN^2 communicators per node.
 export CCL_SYCL_SCALEOUT_HOST_BUF_SIZE=${CCL_SYCL_SCALEOUT_HOST_BUF_SIZE:-$((256 * 1024 * 1024))}
 unset CCL_OP_SYNC CCL_WORKER_AFFINITY  # oneCCL#223; explicit affinity aborts oneCCL 2022
+# oneCCL#222: a cross-node broadcast moves no data when the process's first communicator was
+# intra-node (e.g. a TP generator's); the scheduler path, taken at threshold 0, is correct.
+export CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0
 export SYCL_UR_USE_LEVEL_ZERO_V2=1  # the v1 adapter aborts intermittently (ur_die)
 export ZE_ENABLE_PCI_ID_DEVICE_ORDER=1 TORCH_LLM_ALLREDUCE=1
 export TMPDIR=/tmp  # PBS's TMPDIR exists only on the head node
@@ -75,7 +79,7 @@ ulimit -c 0
 # worker and every proc it forks to one core.
 python3 -m monarch._src.job._pbs_batch --mpiexec "$MPIEXEC" --rank-env PALS_RANKID \
     --mpiexec-arg=--cpu-bind=none \
-    "python3 -m torchtitan.rl.train --module torchtitan_recipes.rl.alphabet_sort \
+    "python3 -m torchtitan.rl.train --module $MODULE \
     --config $CONFIG --output-dir $DUMP_FOLDER $EXTRA_ARGS $*" > "$LOG" 2>&1
 STATUS=$?
 grep -E "Train \| Step" "$LOG" | tail -3
