@@ -15,7 +15,8 @@
 # from torchtitan/rl/example_checkpoint/Qwen3-0.6B (a link to the shared copy).
 # DP_REPLICATE=<R> runs the _rep<R> variant (FSDP across nodes), e.g. 8 nodes:
 #   qsub -l select=8 -v ARM=full,PPN=4,NUM_STEPS=2,DP_REPLICATE=1 scripts/rl/xpu/run_grpo.sh
-# Overridable: ARM PPN NUM_STEPS DP_REPLICATE CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
+# GEN_TP=<T> spreads each vLLM generator over T tiles (the _gtp<T> variant).
+# Overridable: ARM PPN NUM_STEPS DP_REPLICATE GEN_TP CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
 
 # The checkout qsub ran from (cd there first), so a second clone runs its own code.
 TORCHTITAN_DIR=${TORCHTITAN_DIR:-${PBS_O_WORKDIR:-$HOME/git/torchtitan}}
@@ -30,7 +31,7 @@ MPIEXEC=${MPIEXEC:-/opt/cray/pals/1.8/bin/mpiexec}  # PALS, not Intel MPI's Hydr
 EXTRA_ARGS=${EXTRA_ARGS:-}  # qsub passes no script args; extra flags go through here
 mapfile -t NODES < <(sed 's/\..*//' "${PBS_NODEFILE:?run inside a PBS job}" | awk '!seen[$0]++')
 NUM_NODES=${#NODES[@]}
-CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}${DP_REPLICATE:+_rep$DP_REPLICATE}_${NUM_STEPS}steps}
+CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}${DP_REPLICATE:+_rep$DP_REPLICATE}${GEN_TP:+_gtp$GEN_TP}_${NUM_STEPS}steps}
 DUMP_FOLDER=${DUMP_FOLDER:-outputs/${CONFIG}}
 LOG=${LOG:-$DUMP_FOLDER/train.log}
 

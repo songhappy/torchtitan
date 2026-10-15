@@ -1388,13 +1388,15 @@ def _rl_grpo_qwen3_0_6b_hosts(
     steps: int,
     *,
     dp_replicate: int | None = None,
+    generator_tp: int = 1,
 ) -> Controller.Config:
     """``rl_grpo_qwen3_0_6b_flex`` laid out on ``num_hosts`` x ``gpus_per_host``.
 
-    Single-GPU generators and trainer TP=1; loads the HF weights but saves no
-    checkpoint. ``arm="lora"`` trains rank-32 adapters on the attention projections.
-    ``dp_replicate`` overrides the per-host replicas, so one model copy is sharded
-    across hosts (the layout a model too large for one host needs).
+    Trainer TP=1; loads the HF weights but saves no checkpoint. ``arm="lora"`` trains
+    rank-32 adapters on the attention projections. ``dp_replicate`` overrides the
+    per-host replicas, so one model copy is sharded across hosts (the layout a model
+    too large for one host needs). ``generator_tp`` spreads each vLLM generator over
+    that many GPUs (default: one GPU per generator).
     """
     config = rl_grpo_qwen3_0_6b_flex()
     rep, shard, generators = _qwen3_0_6b_host_layout(num_hosts, gpus_per_host)
@@ -1407,9 +1409,9 @@ def _rl_grpo_qwen3_0_6b_hosts(
         tensor_parallel_degree=1,
     )
     config.generator.parallelism = dataclasses.replace(
-        config.generator.parallelism, tensor_parallel_degree=1
+        config.generator.parallelism, tensor_parallel_degree=generator_tp
     )
-    config.num_generators = generators
+    config.num_generators = generators // generator_tp
     config.async_loop.num_training_steps = steps
     config.async_loop.validation.num_samples = 0
     assert config.trainer.checkpointer is not None
@@ -1461,4 +1463,19 @@ for _arm in ("full", "lora"):
                             _gpus,
                             _steps,
                             dp_replicate=_rep,
+                        )
+                # _gtp<T>: each vLLM generator spans T GPUs (tensor parallel).
+                generator_gpus = _gpus - _gpus // 2 if _hosts == 1 else _gpus
+                for _gtp in (2, 4):
+                    if generator_gpus % _gtp == 0:
+                        globals()[
+                            f"rl_grpo_qwen3_0_6b_{_arm}_{_hosts}n_ppn{_gpus}"
+                            f"_gtp{_gtp}_{_steps}steps"
+                        ] = functools.partial(
+                            _rl_grpo_qwen3_0_6b_hosts,
+                            _arm,
+                            _hosts,
+                            _gpus,
+                            _steps,
+                            generator_tp=_gtp,
                         )
