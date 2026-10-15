@@ -186,6 +186,7 @@ vLLM `main` pins the matching set in `requirements/xpu.txt` (`torch==2.14.0`,
 `triton==3.8.0+xpu`, `vllm_xpu_kernels==0.1.15.4`):
 
 ```bash
+git clone https://github.com/vllm-project/vllm.git $VLLM_DIR
 cd $VLLM_DIR && git checkout 083060d04
 pip install -r requirements/xpu.txt \
     --extra-index-url https://download.pytorch.org/whl/xpu --extra-index-url https://wheels.vllm.ai/xpu/
@@ -337,8 +338,10 @@ weight-grad backward).
   `!!!!`, every reward 0, and the run stops after 10 untrainable batches (2026-10-15, `_gtp2`/`_gtp4`
   at 2 and 8 nodes). oneCCL fixes a process's tile index at its first communicator, which in a TP
   generator is vLLM's TP group, so the later cross-node weight broadcasts to tiles 1+ move nothing.
-  On 1 node (shared-memory pull) `_gtp2` passes. Workaround: `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`
-  (2n and 8n `_gtp2` pass with it); the default configs use single-tile generators.
+  On 1 node (shared-memory pull) `_gtp2` passes. `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` makes 2n
+  and 8n `_gtp2` pass (set it in the environment you submit from), but it selects the scheduler path of
+  #224 (below), so it is not a launcher default until it passes a full regression; the default configs
+  use single-tile generators.
 - **vLLM with TP > 1 dumps core at process exit** (plain vLLM TP2/TP4, re-seen 2026-10-15) after
   generating correctly; run from a directory with room for the cores, or `ulimit -c 0`.
 - Seen with the older Monarch build, not in the 78 runs since the move to Monarch `main`
