@@ -64,8 +64,7 @@ on 4 or more nodes also has `_rep1` and `_rep2` variants (select them with
 | `rl_grpo_qwen3_0_6b_{full,lora}_8n_ppn4_rep2_2steps` | 8 | 2 x 8 | 2 (full arm hangs, see [Known issues](#known-issues)) |
 
 `_gtp<T>` variants (select with `GEN_TP=<T>`) spread each vLLM generator over T tiles, e.g.
-`rl_grpo_qwen3_0_6b_full_2n_ppn4_gtp2_2steps`. Across nodes they need a oneCCL setting (see
-[Known issues](#known-issues)).
+`rl_grpo_qwen3_0_6b_full_2n_ppn4_gtp2_2steps`.
 
 ## Running
 
@@ -120,6 +119,10 @@ hosts.
 - 2 nodes x 1, 2, 4, 8, 12 tiles, full and LoRA (the whole trainer on one node);
 - 16 nodes x 4 and 12 tiles, full and LoRA, one model copy per trainer node (`8 x 4`, `8 x 12`);
 - the four 10-step runs below.
+
+**Regression, 2026-10-16** (`sweep.sh "all gtp"`, 31 runs, with `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`): 25/31
+pass -- every layout above, `1 x 32`, and generators over 2 and 4 tiles at 2 and 8 nodes. The six failures are the
+known ones: 2 copies across nodes (4, hang) and `1 x 96` (2, intermittent; see [Known issues](#known-issues)).
 
 FSDP across nodes, same day: `1 x 8` (4 nodes) and `1 x 16` (8 nodes) pass in both arms, `2 x 8`
 (8 nodes) passes with LoRA and hangs with full GRPO (see [Known issues](#known-issues)).
@@ -283,8 +286,9 @@ are worked around by config fields that default to on when the device is XPU:
    generator at a time (26-160 s once, at 4-8 nodes); later pulls stay concurrent.
 
 A third bug, a SIGSEGV past ~9 communicators per process on the scheduler path
-([#224](https://github.com/uxlfoundation/oneCCL/issues/224)), is avoided by the default SYCL
-path: do not set `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` or `CCL_ENABLE_SYCL_KERNELS=0`.
+([#224](https://github.com/uxlfoundation/oneCCL/issues/224)), did not show with the launcher's
+`CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` (below) in the full regression up to 16 nodes x 12 tiles
+(2026-10-16). Do not set `CCL_ENABLE_SYCL_KERNELS=0`: FSDP training then segfaults.
 
 **Environment the launcher sets, and why:**
 
@@ -292,6 +296,7 @@ path: do not set `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` or `CCL_ENABLE_SYCL_K
 |---------|-----|
 | `CCL_OP_SYNC` unset | on oneCCL 2022 it turns cross-node `all_reduce` above 4 MiB into a silent no-op ([#223](https://github.com/uxlfoundation/oneCCL/issues/223)): HSDP replicas then train apart while the metrics look normal |
 | `CCL_WORKER_AFFINITY` unset | oneCCL 2022 aborts communicator init on an explicit list |
+| `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` | oneCCL #222: without it, vLLM generators spread over several tiles receive no weights across nodes (see [Known issues](#known-issues)); no measurable cost at 8 nodes |
 | `CCL_SYCL_SCALEOUT_HOST_BUF_SIZE=256 MiB` | each weight-pull communicator holds this host buffer; the default 2 GiB fills host memory at 12 tiles per node |
 | `SYCL_UR_USE_LEVEL_ZERO_V2=1` | the v1 Level Zero adapter aborts about once per 100-150 steps (`urEventWait must not be called for an internal event`); not root-caused |
 | `ZE_FLAT_DEVICE_HIERARCHY=FLAT` (`env_torch214.sh`) | one device per tile; the oneAPI 2026.1 module sets COMPOSITE |
@@ -318,9 +323,9 @@ weight-grad backward).
   plain PyTorch FSDP2 (no RL) while raw collectives on the same mesh pass, so it is in FSDP2's HSDP
   path on XPU. Use `dp_replicate=1` or one copy per node.
 - **One copy over 96 tiles (`1 x 96`, 16n x 12) is at the edge.** Each generator opens one
-  communicator per volume shard: host memory reached 966 GB (88% of a node) with LoRA, and full
-  GRPO failed its first pull in TorchStore's handshake (`onecclCommInitRank failed with code 11`),
-  seen 2026-10-15. `1 x 32` and one copy per node are fine.
+  communicator per volume shard: host memory reached 966 GB (88% of a node) with LoRA, and the
+  first pull intermittently fails in TorchStore's handshake (`onecclCommInitRank failed with code 11`),
+  in both arms (2026-10-15/16; a rerun of the same layout passed). `1 x 32` and one copy per node are fine.
 - **The first weight pull grows with `dp_shard`.** Each generator opens one communicator per volume
   shard, and the first pull runs one generator at a time (oneCCL #225): at 16n x 12 tiles a
   generator takes ~8 s at `8 x 12`, ~21 s at `2 x 48`, ~40 s at `1 x 96` -- an hour for 96
@@ -334,14 +339,12 @@ weight-grad backward).
 - **Checkpoint saving is off** (`load_only=True` in the recipe): on the torch 2.12 stack the
   DCP save ran out of device memory inside oneCCL at 8 nodes; not re-tested on 2.14. Do not
   disable the checkpointer instead; that also skips loading the pretrained weights.
-- **Generators with TP > 1 across nodes load garbage weights** (oneCCL #222): every completion is
+- **Generators with TP > 1 across nodes loaded garbage weights** (oneCCL #222): every completion was
   `!!!!`, every reward 0, and the run stops after 10 untrainable batches (2026-10-15, `_gtp2`/`_gtp4`
   at 2 and 8 nodes). oneCCL fixes a process's tile index at its first communicator, which in a TP
   generator is vLLM's TP group, so the later cross-node weight broadcasts to tiles 1+ move nothing.
-  On 1 node (shared-memory pull) `_gtp2` passes. `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` makes 2n
-  and 8n `_gtp2` pass (add it to `qsub -v`, e.g. `-v ARM=full,GEN_TP=2,CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`), but it selects the scheduler path of
-  #224 (below), so it is not a launcher default until it passes a full regression; the default configs
-  use single-tile generators.
+  The launcher now sets `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`, which avoids it: `_gtp2`/`_gtp4` pass
+  at 2 and 8 nodes (2026-10-16). If you see `!!!!` completions, check that the variable reached the job.
 - **vLLM with TP > 1 dumps core at process exit** (plain vLLM TP2/TP4, re-seen 2026-10-15) after
   generating correctly; run from a directory with room for the cores, or `ulimit -c 0`.
 - Seen with the older Monarch build, not in the 78 runs since the move to Monarch `main`
