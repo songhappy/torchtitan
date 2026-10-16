@@ -339,12 +339,13 @@ weight-grad backward).
 - **Checkpoint saving is off** (`load_only=True` in the recipe): on the torch 2.12 stack the
   DCP save ran out of device memory inside oneCCL at 8 nodes; not re-tested on 2.14. Do not
   disable the checkpointer instead; that also skips loading the pretrained weights.
-- **Generators with TP > 1 across nodes loaded garbage weights** (oneCCL #222): every completion was
-  `!!!!`, every reward 0, and the run stops after 10 untrainable batches (2026-10-15, `_gtp2`/`_gtp4`
-  at 2 and 8 nodes). oneCCL fixes a process's tile index at its first communicator, which in a TP
-  generator is vLLM's TP group, so the later cross-node weight broadcasts to tiles 1+ move nothing.
-  The launcher now sets `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`, which avoids it: `_gtp2`/`_gtp4` pass
-  at 2 and 8 nodes (2026-10-16). If you see `!!!!` completions, check that the variable reached the job.
+- **Generators with TP > 1 across nodes: fixed by the launcher** (oneCCL #222). Without
+  `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`, which `run_grpo.sh` sets, they load garbage weights: every
+  completion is `!!!!`, every reward 0, and the run stops after 10 untrainable batches. oneCCL fixes a
+  process's tile index at its first communicator, which in a TP generator is vLLM's TP group, so later
+  cross-node weight broadcasts to tiles 1+ move nothing. With the variable, `_gtp2`/`_gtp4` pass at 2 and
+  8 nodes (2026-10-16; not yet run at 16 nodes or for many steps). If you see `!!!!`, check that the job
+  has the variable.
 - **vLLM with TP > 1 dumps core at process exit** (plain vLLM TP2/TP4, re-seen 2026-10-15) after
   generating correctly; run from a directory with room for the cores, or `ulimit -c 0`.
 - Seen with the older Monarch build, not in the 78 runs since the move to Monarch `main`
