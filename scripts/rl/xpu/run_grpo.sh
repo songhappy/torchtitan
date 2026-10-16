@@ -49,6 +49,9 @@ export CCL_ALLREDUCE_SCALEOUT=direct CCL_BCAST=double_tree
 # Per-communicator host buffer; the weight pull keeps PPN^2 communicators per node.
 export CCL_SYCL_SCALEOUT_HOST_BUF_SIZE=${CCL_SYCL_SCALEOUT_HOST_BUF_SIZE:-$((256 * 1024 * 1024))}
 unset CCL_OP_SYNC CCL_WORKER_AFFINITY  # oneCCL#223; explicit affinity aborts oneCCL 2022
+# oneCCL#222: a cross-node broadcast moves no data when the process's first communicator was
+# intra-node (e.g. a TP generator's); the scheduler path, taken at threshold 0, is correct.
+export CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0
 export SYCL_UR_USE_LEVEL_ZERO_V2=1  # the v1 adapter aborts intermittently (ur_die)
 export ZE_ENABLE_PCI_ID_DEVICE_ORDER=1 TORCH_LLM_ALLREDUCE=1
 export TMPDIR=/tmp  # PBS's TMPDIR exists only on the head node
