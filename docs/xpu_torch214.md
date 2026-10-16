@@ -124,6 +124,10 @@ hosts.
 pass -- every layout above, `1 x 32`, and generators over 2 and 4 tiles at 2 and 8 nodes. The six failures are the
 known ones: 2 copies across nodes (4, hang) and `1 x 96` (2, intermittent; see [Known issues](#known-issues)).
 
+Generator TP, 2026-10-16: TP 2 and 4 pass in all 9 layouts tried, up to 16 nodes x 12 tiles (48 generators of
+2 tiles); TP 2 at 8 nodes x 4 tiles trains 200/200 steps with LoRA. The 200-step full run died at start on the
+`EADDRINUSE` race (see [Known issues](#known-issues)).
+
 FSDP across nodes, same day: `1 x 8` (4 nodes) and `1 x 16` (8 nodes) pass in both arms, `2 x 8`
 (8 nodes) passes with LoRA and hangs with full GRPO (see [Known issues](#known-issues)).
 
@@ -167,7 +171,7 @@ export CONDA_PREFIX_BASE=$HOME/miniforge3
 | Repo | Branch | Commit | Contents |
 |------|--------|--------|----------|
 | torchtitan | this branch | -- | this guide |
-| monarch | `xpu-all` (github.com/songhappy/monarch) | `5009e95d5` | upstream `main` `5283c8570` + PR #4307 (XPU actor runtime) + the `monarch.job.PBSJob` PR (`pbs-job`) |
+| monarch | `xpu-all` (github.com/songhappy/monarch) | `279f2dd6b` | upstream `main` `5283c8570` + PR #4307 (XPU actor runtime) + the `monarch.job.PBSJob` PR (`pbs-job`, incl. its review changes) |
 | torchstore | `xpu-all` (github.com/songhappy/torchstore) | `2afb113` | PR #171 (XCCL transport) + PR #201 (replicated regions fetched once, spread over replicas) |
 | vLLM | upstream `main` | `083060d04` | no local patches |
 
@@ -321,11 +325,15 @@ weight-grad backward).
   `2 x 16` (both arms), seen 2026-10-14. One copy across all trainer nodes (`1 x 16`, `1 x 32`)
   passes. All trainer ranks wait in FSDP's backward all-gather (TorchStore is idle). It reproduces in
   plain PyTorch FSDP2 (no RL) while raw collectives on the same mesh pass, so it is in FSDP2's HSDP
-  path on XPU. Use `dp_replicate=1` or one copy per node.
-- **One copy over 96 tiles (`1 x 96`, 16n x 12) is at the edge.** Each generator opens one
-  communicator per volume shard: host memory reached 966 GB (88% of a node) with LoRA, and the
-  first pull intermittently fails in TorchStore's handshake (`onecclCommInitRank failed with code 11`),
-  in both arms (2026-10-15/16; a rerun of the same layout passed). `1 x 32` and one copy per node are fine.
+  path on XPU: the shard-group reduce-scatter and the replicate all-reduce, both cross-node, deadlock.
+  More oneCCL workers (`CCL_WORKER_COUNT=2/4`) only delay it (2 steps, then the ranks diverge) and
+  segfault in RL; no setting fixes it (2026-10-16). Use `dp_replicate=1` or one copy per node.
+- **One copy over 96 tiles (`1 x 96`, 16n x 12) hits oneCCL's limit of 128 communicators per
+  process.** TorchStore keeps one 2-rank communicator per (generator, storage volume) pair, and at
+  `1 x 96` every volume needs ~96 of them plus its others; the next fails in TorchStore's handshake as
+  `onecclCommInitRank failed with code 11` (`create_comm_id ... invalid_comm_id` in the oneCCL log),
+  intermittently in both arms. Proven with a standalone test that fails at communicator 129
+  (2026-10-16). Keep one copy's `dp_shard` well under 128; `1 x 32` and one copy per node are fine.
 - **The first weight pull grows with `dp_shard`.** Each generator opens one communicator per volume
   shard, and the first pull runs one generator at a time (oneCCL #225): at 16n x 12 tiles a
   generator takes ~8 s at `8 x 12`, ~21 s at `2 x 48`, ~40 s at `1 x 96` -- an hour for 96
@@ -343,9 +351,14 @@ weight-grad backward).
   `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0`, which `run_grpo.sh` sets, they load garbage weights: every
   completion is `!!!!`, every reward 0, and the run stops after 10 untrainable batches. oneCCL fixes a
   process's tile index at its first communicator, which in a TP generator is vLLM's TP group, so later
-  cross-node weight broadcasts to tiles 1+ move nothing. With the variable, `_gtp2`/`_gtp4` pass at 2 and
-  8 nodes (2026-10-16; not yet run at 16 nodes or for many steps). If you see `!!!!`, check that the job
-  has the variable.
+  cross-node weight broadcasts to tiles 1+ move nothing. With the variable, TP 2 and 4 pass at 2, 8 and
+  16 nodes and at 8 and 12 tiles per node (2026-10-16). If you see `!!!!`, check that the job has the
+  variable.
+- **`EADDRINUSE` at startup** (`The server socket has failed to listen ... address already in use` in
+  TorchStore's XCCL handshake), then `Mapping is missing from the store ... key='model_state_dict'`:
+  the handshake picks a free port and binds it later, and another process on the host can take it in
+  between; more likely with many generator processes per node. Resubmit; a fix (bind port 0) is
+  pending in TorchStore.
 - **vLLM with TP > 1 dumps core at process exit** (plain vLLM TP2/TP4, re-seen 2026-10-15) after
   generating correctly; run from a directory with room for the cores, or `ulimit -c 0`.
 - Seen with the older Monarch build, not in the 78 runs since the move to Monarch `main`
