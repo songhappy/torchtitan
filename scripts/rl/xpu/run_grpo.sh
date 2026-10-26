@@ -22,7 +22,7 @@
 TORCHTITAN_DIR=${TORCHTITAN_DIR:-${PBS_O_WORKDIR:-$HOME/git/torchtitan}}
 source "${ONEAPI_ENV_SCRIPT:-$TORCHTITAN_DIR/scripts/rl/xpu/env_torch214.sh}"
 eval "$("${CONDA_PREFIX_BASE:-$HOME/miniforge3}/bin/conda" shell.bash hook)"
-conda activate "${CONDA_ENV:-monarch_t215}"  # torch 2.15; CONDA_ENV=monarch_t214 for torch 2.14
+conda activate "${CONDA_ENV:-monarch_t214}"  # torch 2.14; CONDA_ENV=monarch_t215 for torch 2.15
 
 ARM=${ARM:-full}
 PPN=${PPN:-4}
