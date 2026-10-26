@@ -87,7 +87,7 @@ qsub -l select=8 -q capacity -v ARM=full,PPN=4,NUM_STEPS=2,DP_REPLICATE=1 script
 | `DP_REPLICATE` | unset | select the `_rep<R>` variant (FSDP across nodes) |
 | `CONFIG` | from the above | any config in `alphabet_sort.py` |
 | `DUMP_FOLDER`, `LOG` | `outputs/<config>`, `$DUMP_FOLDER/train.log` | output locations |
-| `CONDA_ENV` | `monarch_pbs` | the env from [Environment setup](#environment-setup) |
+| `CONDA_ENV` | `monarch_t215` | `monarch_t215` (torch 2.15) or `monarch_t214` (torch 2.14); see [Environment setup](#environment-setup) |
 | `TORCHTITAN_DIR`, `ONEAPI_ENV_SCRIPT`, `MPIEXEC`, `EXTRA_ARGS` | see the script | rarely needed |
 
 Per-user queue limits on Aurora: `debug` (<= 2 nodes) and `debug-scaling` take one
@@ -155,6 +155,13 @@ Earlier 200-step runs on 8 nodes checksummed every TorchStore weight transfer on
 
 ## Environment setup
 
+Two envs, one per torch (2026-10-26). Both pass the basic regression (18/18).
+
+| Env | Stack | Notes |
+|---|---|---|
+| `monarch_t215` (launcher default) | torch 2.15.0.dev20261005+xpu (last 2.15 nightly), torchvision 0.30.0.dev20261005, triton-xpu 3.9.0, oneccl 2022.1.2, intel-sycl-rt 2026.1.2 | as below, except: no vllm-xpu-kernels wheel exists for 2.15, so 0.1.15.4 is built from source (branch `release/0.1.15.4`, `VLLM_XPU_AOT_DEVICES=pvc`, `VLLM_XPU_ENABLE_XE3P=0`) with the ocloc its CI pins (IGC 2.34.4 + compute-runtime 26.18, `build_script/gpu_runtime_packages.json`). Aurora's system ocloc 25.18 / IGC 2.11 miscompiles its flash-attention kernels for PVC with no error (vLLM generates garbage). vLLM and Monarch are built from their own worktrees (`~/git/vllm-candidate`, `~/git/monarch-candidate`), same commits as below |
+| `monarch_t214` | the recipe below (renamed from `monarch_pbs`) | fallback: `CONDA_ENV=monarch_t214` |
+
 Build on the UAN (login node), never on a compute node. Prerequisites: Aurora access,
 miniforge3, the Qwen3-0.6B weights on a filesystem the compute nodes read, and the
 dataset cached once on the UAN (runs set `HF_HUB_OFFLINE=1`):
@@ -179,8 +186,8 @@ export CONDA_PREFIX_BASE=$HOME/miniforge3
 
 ```bash
 source $TORCHTITAN_DIR/scripts/rl/xpu/env_torch214.sh   # oneAPI 2026.1, gcc 14.3
-$CONDA_PREFIX_BASE/bin/conda create -n monarch_pbs python=3.12 -y   # the launcher's CONDA_ENV
-eval "$($CONDA_PREFIX_BASE/bin/conda shell.bash hook)" && conda activate monarch_pbs
+$CONDA_PREFIX_BASE/bin/conda create -n monarch_t214 python=3.12 -y   # CONDA_ENV=monarch_t214
+eval "$($CONDA_PREFIX_BASE/bin/conda shell.bash hook)" && conda activate monarch_t214
 conda install -y -c conda-forge rust=1.97.1
 ```
 
