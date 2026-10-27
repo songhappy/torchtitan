@@ -438,3 +438,46 @@ def test_rollouter_config_wires_alphabet_sort() -> None:
     assert isinstance(config.worker.message_env, AlphabetSortEnv.Config)
     assert len(config.worker.rubric.reward_fns) == 1
     assert isinstance(config.worker.rubric.reward_fns[0], RewardAlphabetSort.Config)
+
+
+@pytest.mark.parametrize(
+    "hosts,gpus,expected",
+    [(1, 4, (1, 2, 2)), (2, 4, (1, 4, 4)), (2, 10, (5, 2, 10)), (16, 12, (8, 12, 96))],
+)
+def test_host_layout_default_is_half_trainer_half_generators(
+    hosts, gpus, expected
+) -> None:
+    from torchtitan_recipes.rl.alphabet_sort import _qwen3_0_6b_host_layout
+
+    assert _qwen3_0_6b_host_layout(hosts, gpus) == expected
+
+
+def test_weak_scaling_sizes_the_batch_to_the_trainer() -> None:
+    from torchtitan_recipes.rl import alphabet_sort as recipes
+
+    fixed = recipes.rl_grpo_qwen3_0_6b_full_16n_ppn12_10steps()
+    weak = recipes.rl_grpo_qwen3_0_6b_full_16n_ppn12_batch_scaled_10steps()
+    assert fixed.async_loop.num_prompts_per_train_step == 8  # 64 samples on 96 ranks
+    assert weak.async_loop.num_prompts_per_train_step == 192  # 16 samples per rank
+    small = recipes.rl_grpo_qwen3_0_6b_full_2n_ppn4_batch_scaled_10steps()
+    assert small.async_loop.num_prompts_per_train_step == 8  # never below the default
+
+
+@pytest.mark.parametrize(
+    "split,expected",
+    [((4, 12), (1, 4, 12)), ((12, 1), (1, 12, 1)), ((1, 12), (1, 1, 12))],
+)
+def test_host_layout_split_sizes_each_side_on_its_host(split, expected) -> None:
+    from torchtitan_recipes.rl.alphabet_sort import _qwen3_0_6b_host_layout
+
+    assert _qwen3_0_6b_host_layout(2, 12, split=split) == expected
+
+
+def test_upstream_layout_and_seeded_long_runs() -> None:
+    from torchtitan_recipes.rl import alphabet_sort as recipes
+
+    up = recipes.rl_grpo_qwen3_0_6b_full_1n_ppn4_upstream_200steps()
+    assert up.trainer.parallelism.tensor_parallel_degree == 2
+    assert up.generator.parallelism.tensor_parallel_degree == 2
+    assert up.trainer.debug.seed == up.generator.debug.seed == 42
+    assert recipes.rl_grpo_qwen3_0_6b_full_2n_ppn12_2steps().trainer.debug.seed is None

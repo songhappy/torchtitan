@@ -12,6 +12,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 """
 
 import dataclasses
+import functools
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
 
@@ -27,7 +28,9 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
+    apply_transforms,
     BatchInvariantFlexConverter,
+    LoRATransform,
     ModelConfigConverter,
     MXFP8LinearConverter,
 )
@@ -916,3 +919,206 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
         config.generator, model=generator_model, parallelism=generator_parallelism
     )
     return config
+
+
+def _qwen3_0_6b_host_layout(
+    num_hosts: int, gpus_per_host: int, split: tuple[int, int] | None = None
+) -> tuple[int, int, int]:
+    """``(dp_replicate, dp_shard, num_generators)`` for ``num_hosts`` hosts.
+
+    One host splits its GPUs between trainer and generators; more hosts train on
+    half of them with one dp_replicate group per trainer host, so the per-layer
+    all-gather stays on a host. When FSDP cannot shard Qwen3-0.6B's stacked FFN
+    weight (dim 1 = 3072) that way, the smallest dp_replicate that can is used.
+    ``split=(trainer_gpus, generators)`` on 2 hosts puts that many trainer GPUs on the
+    first host and generators on the second, so one side's size changes with the
+    other held at a full host.
+    """
+    if split is not None:
+        trainer, generators = split
+        if num_hosts != 2 or not (
+            0 < trainer <= gpus_per_host and 0 < generators <= gpus_per_host
+        ):
+            raise ValueError(
+                f"split={split} needs 2 hosts with up to {gpus_per_host} GPUs per side"
+            )
+        replicas = 1
+    elif num_hosts == 1:
+        trainer, generators, replicas = (
+            gpus_per_host // 2,
+            gpus_per_host - gpus_per_host // 2,
+            1,
+        )
+    else:
+        trainer = num_hosts // 2 * gpus_per_host
+        generators = (num_hosts - num_hosts // 2) * gpus_per_host
+        replicas = num_hosts // 2
+    for rep in (replicas, *range(1, trainer + 1)):
+        shard = trainer // rep
+        if (
+            trainer % rep == 0
+            and shard <= gpus_per_host
+            and (shard <= 2 or 3072 % shard == 0)
+        ):
+            return rep, shard, generators
+    raise ValueError(f"no trainer mesh for {num_hosts} hosts x {gpus_per_host} GPUs")
+
+
+def _rl_grpo_qwen3_0_6b_hosts(
+    arm: str,
+    num_hosts: int,
+    gpus_per_host: int,
+    steps: int,
+    *,
+    dp_replicate: int | None = None,
+    generator_tp: int = 1,
+    split: tuple[int, int] | None = None,
+    scale_batch: bool = False,
+    upstream_layout: bool = False,
+) -> Controller.Config:
+    """``rl_grpo_qwen3_0_6b_flex`` laid out on ``num_hosts`` x ``gpus_per_host``.
+
+    Trainer TP=1; loads the HF weights but saves no checkpoint. ``arm="lora"`` trains
+    rank-32 adapters on the attention projections. ``dp_replicate`` overrides the
+    per-host replicas, so one model copy is sharded across hosts (the layout a model
+    too large for one host needs). ``generator_tp`` spreads each vLLM generator over
+    that many GPUs (default: one GPU per generator). ``split`` is passed to
+    ``_qwen3_0_6b_host_layout``. ``scale_batch`` sizes the batch to the trainer (16
+    samples per rank) so it never idles as the layout grows; by default every layout
+    trains on the same 64 samples per step. ``upstream_layout`` keeps the base
+    recipe's parallelism (trainer TP 2, one generator TP 2; one host), the rest as
+    above, so upstream's layout and ours compare like for like. Runs of 200+ steps
+    are seeded (42, trainer and generators) so layouts can be compared step by step.
+    """
+    config = rl_grpo_qwen3_0_6b_flex()
+    if upstream_layout:
+        if num_hosts != 1:
+            raise ValueError("upstream_layout is the base recipe's one-host layout")
+        p = config.trainer.parallelism
+        rep, shard = p.data_parallel_replicate_degree, p.data_parallel_shard_degree
+    else:
+        rep, shard, generators = _qwen3_0_6b_host_layout(
+            num_hosts, gpus_per_host, split
+        )
+        if dp_replicate is not None:
+            rep, shard = dp_replicate, rep * shard // dp_replicate
+        config.trainer.parallelism = dataclasses.replace(
+            config.trainer.parallelism,
+            data_parallel_replicate_degree=rep,
+            data_parallel_shard_degree=shard,
+            tensor_parallel_degree=1,
+        )
+        config.generator.parallelism = dataclasses.replace(
+            config.generator.parallelism, tensor_parallel_degree=generator_tp
+        )
+        config.num_generators = generators // generator_tp
+    if steps >= 200:
+        config.trainer.debug.seed = config.generator.debug.seed = 42
+    if scale_batch:
+        loop = config.async_loop
+        loop.num_prompts_per_train_step = max(
+            loop.num_prompts_per_train_step,
+            16 * rep * shard // loop.num_samples_per_prompt,
+        )
+    config.async_loop.num_training_steps = steps
+    config.async_loop.validation.steps = 0
+    assert config.trainer.checkpointer is not None
+    config.trainer.checkpointer.load_only = True
+    if arm == "lora":
+        # Both sides get the adapters, so the state dict the generator pulls matches.
+        lora = LoRATransform(rank=32, alpha=64.0, target_modules=["wqkv", "wo"])
+        config.trainer = apply_transforms(config.trainer, [lora])
+        config.generator = apply_transforms(config.generator, [lora])
+    return config
+
+
+# rl_grpo_qwen3_0_6b_{full,lora}_<hosts>n_ppn<gpus>_<steps>steps, e.g.
+# rl_grpo_qwen3_0_6b_lora_8n_ppn4_10steps, for multi-host runs and the scaling matrix; on 4+ hosts
+# also ..._trn_c<R>_<steps>steps (e.g. rl_grpo_qwen3_0_6b_full_16n_ppn4_trn_c2_2steps).
+for _arm in ("full", "lora"):
+    for _hosts in (1, 2, 4, 8, 16):
+        for _gpus in (1, 2, 4, 6, 8, 10, 12):
+            for _steps in (2, 10, 200):
+                if _hosts == 1 and _gpus < 2:
+                    continue
+                globals()[
+                    f"rl_grpo_qwen3_0_6b_{_arm}_{_hosts}n_ppn{_gpus}_{_steps}steps"
+                ] = functools.partial(
+                    _rl_grpo_qwen3_0_6b_hosts, _arm, _hosts, _gpus, _steps
+                )
+                # _trn_c<R>: R model copies, each sharded across hosts (FSDP across nodes).
+                for _rep in (1, 2):
+                    if _hosts > 2 and _hosts // 2 * _gpus % _rep == 0:
+                        globals()[
+                            f"rl_grpo_qwen3_0_6b_{_arm}_{_hosts}n_ppn{_gpus}"
+                            f"_trn_c{_rep}_{_steps}steps"
+                        ] = functools.partial(
+                            _rl_grpo_qwen3_0_6b_hosts,
+                            _arm,
+                            _hosts,
+                            _gpus,
+                            _steps,
+                            dp_replicate=_rep,
+                        )
+                # _gen_tp<T>: each vLLM generator spans T GPUs (tensor parallel).
+                generator_gpus = _gpus - _gpus // 2 if _hosts == 1 else _gpus
+                for _gtp in (2, 4):
+                    if generator_gpus % _gtp == 0:
+                        globals()[
+                            f"rl_grpo_qwen3_0_6b_{_arm}_{_hosts}n_ppn{_gpus}"
+                            f"_gen_tp{_gtp}_{_steps}steps"
+                        ] = functools.partial(
+                            _rl_grpo_qwen3_0_6b_hosts,
+                            _arm,
+                            _hosts,
+                            _gpus,
+                            _steps,
+                            generator_tp=_gtp,
+                        )
+
+
+# Test one side with the other at its default on one full host: ..._2n_ppn12_trn_t<A> (A trainer GPUs,
+# 12 generators) and ..._2n_ppn12_gen_t<E> (a 12-GPU trainer, E generators). ..._batch_scaled_10steps:
+# the default layout with the batch sized to the trainer, for scaling both sides together.
+for _arm in ("full", "lora"):
+    for _gpus in (4, 12):
+        for _hosts in (1, 2, 4, 8, 16):
+            for _steps in (10, 30):
+                globals()[
+                    f"rl_grpo_qwen3_0_6b_{_arm}_{_hosts}n_ppn{_gpus}_batch_scaled_{_steps}steps"
+                ] = functools.partial(
+                    _rl_grpo_qwen3_0_6b_hosts,
+                    _arm,
+                    _hosts,
+                    _gpus,
+                    _steps,
+                    scale_batch=True,
+                )
+    for _side in ("trn", "gen"):
+        for _size in (1, 2, 4, 8, 12):
+            for _steps in (2, 10):
+                globals()[
+                    f"rl_grpo_qwen3_0_6b_{_arm}_2n_ppn12_{_side}_t{_size}_{_steps}steps"
+                ] = functools.partial(
+                    _rl_grpo_qwen3_0_6b_hosts,
+                    _arm,
+                    2,
+                    12,
+                    _steps,
+                    split=(_size, 12) if _side == "trn" else (12, _size),
+                )
+
+# ..._1n_ppn4_upstream_<steps>steps: the base recipe's layout (trainer TP 2, one generator TP 2) with our run settings.
+for _arm in ("full", "lora"):
+    for _steps in (2, 10, 200):
+        globals()[
+            f"rl_grpo_qwen3_0_6b_{_arm}_1n_ppn4_upstream_{_steps}steps"
+        ] = functools.partial(
+            _rl_grpo_qwen3_0_6b_hosts, _arm, 1, 4, _steps, upstream_layout=True
+        )
+
+# ..._8n_ppn12_1000steps: the soak run (seeded like every 200+ step run).
+for _arm in ("full", "lora"):
+    globals()[f"rl_grpo_qwen3_0_6b_{_arm}_8n_ppn12_1000steps"] = functools.partial(
+        _rl_grpo_qwen3_0_6b_hosts, _arm, 8, 12, 1000
+    )
