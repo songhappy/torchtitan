@@ -1,5 +1,5 @@
 #!/bin/bash
-# oneAPI 2026.1 toolchain for the torch 2.14.0+xpu RL stack on Aurora; sourced by
+# oneAPI 2026.1 toolchain for the torch 2.15 XPU RL stack on Aurora; sourced by
 # every launcher in this directory (override with ONEAPI_ENV_SCRIPT).
 #
 # torch 2.14.0+xpu ships the oneAPI 2026.1 SYCL runtime (libsycl.so.9). Never mix
@@ -9,7 +9,7 @@
 module reset 2>/dev/null || true
 module load oneapi/release/2026.1.0 gcc/14.3.0 2>/dev/null || true
 if ! icpx --version 2>/dev/null | head -1 | grep -q "2026\.1"; then
-    echo "ERROR: env_torch214.sh expected icpx 2026.1, got: $(icpx --version 2>&1 | head -1)"
+    echo "ERROR: env_torch215.sh expected icpx 2026.1, got: $(icpx --version 2>&1 | head -1)"
 fi
 # The 2026.1 module sets ZE_FLAT_DEVICE_HIERARCHY=COMPOSITE (one 128 GB device per
 # card, so ZE_AFFINITY_MASK=N picks card N and masks >= 6 see no device), plus

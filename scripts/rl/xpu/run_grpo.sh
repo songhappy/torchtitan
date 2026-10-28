@@ -24,7 +24,7 @@
 
 # The checkout qsub ran from (cd there first), so a second clone runs its own code.
 TORCHTITAN_DIR=${TORCHTITAN_DIR:-${PBS_O_WORKDIR:-$HOME/git/torchtitan}}
-source "${ONEAPI_ENV_SCRIPT:-$TORCHTITAN_DIR/scripts/rl/xpu/env_torch214.sh}"
+source "${ONEAPI_ENV_SCRIPT:-$TORCHTITAN_DIR/scripts/rl/xpu/env_torch215.sh}"
 eval "$("${CONDA_PREFIX_BASE:-$HOME/miniforge3}/bin/conda" shell.bash hook)"
 conda activate "${CONDA_ENV:-monarch_t215}"  # torch 2.15: upstream main needs it
 

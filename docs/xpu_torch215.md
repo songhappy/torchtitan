@@ -1,15 +1,15 @@
-# GRPO on Intel XPU (Aurora, torch 2.14)
+# GRPO on Intel XPU (Aurora, torch 2.15)
 
 This branch runs end-to-end GRPO on Aurora (Intel Data Center GPU Max 1550) with the
 upstream torchtitan RL stack -- Monarch actors, TorchStore weight sync, vLLM generation,
-FSDP2 training -- on **torch 2.14.0+xpu and oneCCL 2022**. It is written for a team that
+FSDP2 training -- on **torch 2.15 (XPU nightly) and oneCCL 2022**, on top of upstream torchtitan main. It is written for a team that
 wants to rebuild the stack, run the reference workloads and check that a run is healthy.
 
 The XPU support follows the CUDA code paths; differences are decided where they matter
 (device type checks in the generator, worker and launch env, oneCCL workarounds that
 default on for XPU). The only Aurora-specific pieces are the launcher
 (`scripts/rl/xpu/run_grpo.sh`, which uses Monarch's `PBSJob` the way `SlurmJob` is used on
-Slurm), the environment script (`scripts/rl/xpu/env_torch214.sh`) and the layout recipes.
+Slurm), the environment script (`scripts/rl/xpu/env_torch215.sh`) and the layout recipes.
 
 Contents: [Quick start](#quick-start) - [Configurations](#configurations) -
 [Running](#running) - [A healthy run](#a-healthy-run) - [Reference results](#reference-results) -
@@ -162,11 +162,10 @@ Two envs, one per torch (2026-10-26). Both pass the basic regression (18/18).
 | `monarch_t215` (launcher default) | torch 2.15.0.dev20261005+xpu (last 2.15 nightly), torchvision 0.30.0.dev20261005, triton-xpu 3.9.0, oneccl 2022.1.2, intel-sycl-rt 2026.1.2 | as below, except: no vllm-xpu-kernels wheel exists for 2.15, so 0.1.15.4 is built from source (branch `release/0.1.15.4`, `VLLM_XPU_AOT_DEVICES=pvc`, `VLLM_XPU_ENABLE_XE3P=0`) with the ocloc its CI pins (IGC 2.34.4 + compute-runtime 26.18, `build_script/gpu_runtime_packages.json`). Aurora's system ocloc 25.18 / IGC 2.11 miscompiles its flash-attention kernels for PVC with no error (vLLM generates garbage). vLLM and Monarch are built from their own worktrees (`~/git/vllm-candidate`, `~/git/monarch-candidate`), same commits as below |
 | `monarch_t214` (pre-rebase branch only) | the recipe below (renamed from `monarch_pbs`) | the stack of the reference results |
 
-Upstream main also needs TorchStore with its routing client (#195) and `spmd_types` 0.3.1;
-until `monarch_t215` is upgraded, pass both in: `qsub -v PYTHONPATH=$HOME/git/rebase_deps:$HOME/git/ts_rebase ...`
-(`~/git/ts_rebase` is TorchStore branch `xpu-all-v2`: upstream main plus the six XPU commits; the last makes the
-routing plan read each generator's keys from one replica on XCCL, without which 16 nodes x 12 tiles never finishes
-the first weight pull).
+Upstream main also needs TorchStore with its routing client (#195) and `spmd_types` 0.3.1 (both in `monarch_t215`).
+TorchStore is branch `xpu-all` of songhappy/torchstore: upstream main plus six XPU commits; the last makes the routing
+plan read each generator's keys from one replica on XCCL, without which 16 nodes x 12 tiles never finishes the first
+weight pull.
 
 Build on the UAN (login node), never on a compute node. Prerequisites: Aurora access,
 miniforge3, the Qwen3-0.6B weights on a filesystem the compute nodes read, and the
@@ -191,7 +190,7 @@ export CONDA_PREFIX_BASE=$HOME/miniforge3
 ### 1. Conda env and toolchain
 
 ```bash
-source $TORCHTITAN_DIR/scripts/rl/xpu/env_torch214.sh   # oneAPI 2026.1, gcc 14.3
+source $TORCHTITAN_DIR/scripts/rl/xpu/env_torch215.sh   # oneAPI 2026.1, gcc 14.3
 $CONDA_PREFIX_BASE/bin/conda create -n monarch_t214 python=3.12 -y   # CONDA_ENV=monarch_t214
 eval "$($CONDA_PREFIX_BASE/bin/conda shell.bash hook)" && conda activate monarch_t214
 conda install -y -c conda-forge rust=1.97.1
@@ -316,7 +315,7 @@ A third bug, a SIGSEGV past ~9 communicators per process on the scheduler path
 | `CCL_SYCL_BROADCAST_SCALEOUT_THRESHOLD=0` | oneCCL #222: without it, vLLM generators spread over several tiles receive no weights across nodes (see [Known issues](#known-issues)); no measurable cost at 8 nodes |
 | `CCL_SYCL_SCALEOUT_HOST_BUF_SIZE=256 MiB` | each weight-pull communicator holds this host buffer; the default 2 GiB fills host memory at 12 tiles per node |
 | `SYCL_UR_USE_LEVEL_ZERO_V2=1` | the v1 Level Zero adapter aborts about once per 100-150 steps (`urEventWait must not be called for an internal event`); not root-caused |
-| `ZE_FLAT_DEVICE_HIERARCHY=FLAT` (`env_torch214.sh`) | one device per tile; the oneAPI 2026.1 module sets COMPOSITE |
+| `ZE_FLAT_DEVICE_HIERARCHY=FLAT` (`env_torch215.sh`) | one device per tile; the oneAPI 2026.1 module sets COMPOSITE |
 | no `TORCHINDUCTOR_CACHE_DIR` | the compile cache stays under `$TMPDIR=/tmp`, per node; a cache on `/home` shared by all nodes races (see [Known issues](#known-issues)) |
 | `TMPDIR=/tmp` | PBS's `TMPDIR` exists only on the head node |
 | `unset HOSTNAME` | otherwise every node looks local to TorchStore |
