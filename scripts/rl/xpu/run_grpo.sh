@@ -18,9 +18,10 @@
 #   qsub -l select=8 -v ARM=full,PPN=4,NUM_STEPS=2,TRN_COPIES=1 scripts/rl/xpu/run_grpo.sh
 # GEN_TP=<T> spreads each vLLM generator over T tiles (the _gen_tp<T> variant).
 # Test one side, the other at its default on one full node (2 nodes x 12): TRN_TILES=<A> (A trainer tiles,
-# _trn_t<A>), GEN_TILES=<E> (E generator tiles, _gen_t<E>). BATCH_SCALED=1 sizes the batch to the trainer.
+# _trn_t<A>), GEN_TILES=<E> (E generator tiles, _gen_t<E>). GEN_NODES=<G> (select=1+G): the trainer on one
+# full node, generators on G full nodes (_gen_n<G>). BATCH_SCALED=1 sizes the batch to the trainer.
 # UPSTREAM=1 (1 node) runs the base recipe's layout: trainer TP 2, one generator TP 2 (_upstream).
-# Overridable: ARM PPN NUM_STEPS TRN_COPIES GEN_TP TRN_TILES GEN_TILES BATCH_SCALED UPSTREAM CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
+# Overridable: ARM PPN NUM_STEPS TRN_COPIES GEN_TP TRN_TILES GEN_TILES BATCH_SCALED UPSTREAM GEN_NODES CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
 
 # The checkout qsub ran from (cd there first), so a second clone runs its own code.
 TORCHTITAN_DIR=${TORCHTITAN_DIR:-${PBS_O_WORKDIR:-$HOME/git/torchtitan}}
@@ -35,7 +36,7 @@ MPIEXEC=${MPIEXEC:-/opt/cray/pals/1.8/bin/mpiexec}  # PALS, not Intel MPI's Hydr
 EXTRA_ARGS=${EXTRA_ARGS:-}  # qsub passes no script args; extra flags go through here
 mapfile -t NODES < <(sed 's/\..*//' "${PBS_NODEFILE:?run inside a PBS job}" | awk '!seen[$0]++')
 NUM_NODES=${#NODES[@]}
-CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}${TRN_COPIES:+_trn_c$TRN_COPIES}${GEN_TP:+_gen_tp$GEN_TP}${TRN_TILES:+_trn_t$TRN_TILES}${GEN_TILES:+_gen_t$GEN_TILES}${BATCH_SCALED:+_batch_scaled}${UPSTREAM:+_upstream}_${NUM_STEPS}steps}
+CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}${TRN_COPIES:+_trn_c$TRN_COPIES}${GEN_TP:+_gen_tp$GEN_TP}${TRN_TILES:+_trn_t$TRN_TILES}${GEN_TILES:+_gen_t$GEN_TILES}${GEN_NODES:+_gen_n$GEN_NODES}${BATCH_SCALED:+_batch_scaled}${UPSTREAM:+_upstream}_${NUM_STEPS}steps}
 DUMP_FOLDER=${DUMP_FOLDER:-outputs/${CONFIG}}
 LOG=${LOG:-$DUMP_FOLDER/train.log}
 

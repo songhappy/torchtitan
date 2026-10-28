@@ -930,17 +930,21 @@ def _qwen3_0_6b_host_layout(
     half of them with one dp_replicate group per trainer host, so the per-layer
     all-gather stays on a host. When FSDP cannot shard Qwen3-0.6B's stacked FFN
     weight (dim 1 = 3072) that way, the smallest dp_replicate that can is used.
-    ``split=(trainer_gpus, generators)`` on 2 hosts puts that many trainer GPUs on the
-    first host and generators on the second, so one side's size changes with the
-    other held at a full host.
+    ``split=(trainer_gpus, generators)`` puts that many trainer GPUs on the first host
+    and the generators on the other hosts, so one side's size changes with the other
+    held: on 2 hosts either side up to a full host, on more hosts the generators
+    spread over the extra hosts.
     """
     if split is not None:
         trainer, generators = split
-        if num_hosts != 2 or not (
-            0 < trainer <= gpus_per_host and 0 < generators <= gpus_per_host
+        if not (
+            num_hosts >= 2
+            and 0 < trainer <= gpus_per_host
+            and 0 < generators <= (num_hosts - 1) * gpus_per_host
         ):
             raise ValueError(
-                f"split={split} needs 2 hosts with up to {gpus_per_host} GPUs per side"
+                f"split={split} needs a trainer on one of {num_hosts} hosts and the "
+                f"generators on the other {num_hosts - 1} (up to {gpus_per_host} GPUs each)"
             )
         replicas = 1
     elif num_hosts == 1:
@@ -1107,6 +1111,22 @@ for _arm in ("full", "lora"):
                     _steps,
                     split=(_size, 12) if _side == "trn" else (12, _size),
                 )
+
+# ..._<1+G>n_ppn12_gen_n<G>: a 12-GPU trainer on one host and 12 generators on each of G more hosts
+# (the generators scale out with the trainer held), e.g. rl_grpo_qwen3_0_6b_full_9n_ppn12_gen_n8_2steps.
+for _arm in ("full", "lora"):
+    for _gen_hosts in (1, 2, 4, 8):
+        for _steps in (2, 10):
+            globals()[
+                f"rl_grpo_qwen3_0_6b_{_arm}_{1 + _gen_hosts}n_ppn12_gen_n{_gen_hosts}_{_steps}steps"
+            ] = functools.partial(
+                _rl_grpo_qwen3_0_6b_hosts,
+                _arm,
+                1 + _gen_hosts,
+                12,
+                _steps,
+                split=(12, 12 * _gen_hosts),
+            )
 
 # ..._1n_ppn4_upstream_<steps>steps: the base recipe's layout (trainer TP 2, one generator TP 2) with our run settings.
 for _arm in ("full", "lora"):

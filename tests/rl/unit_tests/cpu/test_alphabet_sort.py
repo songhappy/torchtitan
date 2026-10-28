@@ -17,6 +17,7 @@ from renderers import Qwen3RendererConfig
 from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.rl.actors.monarch.provisioning import plan_host_meshes
 from torchtitan.rl.examples.alphabet_sort import (
     AlphabetSortDataset,
     AlphabetSortSample,
@@ -29,6 +30,7 @@ from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 
 from torchtitan.rl.rollout.data import IterableRLDataLoader
 from torchtitan.rl.rollout.types import RolloutTurnID
+from torchtitan_recipes.rl import alphabet_sort
 from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
 
 from torchtitan_recipes.tests.rl.alphabet_sort import (
@@ -481,3 +483,38 @@ def test_upstream_layout_and_seeded_long_runs() -> None:
     assert up.generator.parallelism.tensor_parallel_degree == 2
     assert up.trainer.debug.seed == up.generator.debug.seed == 42
     assert recipes.rl_grpo_qwen3_0_6b_full_2n_ppn12_2steps().trainer.debug.seed is None
+
+
+@pytest.mark.parametrize("gen_hosts", [1, 2, 4, 8])
+def test_generators_scale_out_with_the_trainer_on_one_host(gen_hosts):
+    """_gen_n<G>: a 1 x 12 trainer on one host, 12 generators on each of G more hosts."""
+    config = getattr(
+        alphabet_sort,
+        f"rl_grpo_qwen3_0_6b_full_{1 + gen_hosts}n_ppn12_gen_n{gen_hosts}_2steps",
+    )()
+    p = config.trainer.parallelism
+    assert (p.data_parallel_replicate_degree, p.data_parallel_shard_degree) == (1, 12)
+    assert config.num_generators == 12 * gen_hosts
+    assert config.async_loop.num_prompts_per_train_step == 8  # the batch stays fixed
+    host_meshes = plan_host_meshes(
+        _FakeHosts(list(range(1 + gen_hosts))),
+        trainer_world_size=12,
+        per_generator_world_size=1,
+        num_generators=config.num_generators,
+        gpus_per_node=12,
+    )
+    assert host_meshes.trainer.hosts == [0]
+    assert sorted({m.hosts[0] for m in host_meshes.generators}) == list(
+        range(1, 1 + gen_hosts)
+    )
+
+
+class _FakeHosts:
+    def __init__(self, hosts):
+        self.hosts = hosts
+
+    def __len__(self):
+        return len(self.hosts)
+
+    def slice(self, *, hosts):
+        return _FakeHosts(self.hosts[hosts])
