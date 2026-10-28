@@ -518,3 +518,25 @@ class _FakeHosts:
 
     def slice(self, *, hosts):
         return _FakeHosts(self.hosts[hosts])
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "rl_grpo_qwen3_0_6b_flex",
+        "rl_grpo_qwen3_1_7b",
+        "rl_grpo_qwen3_14b",
+        "rl_grpo_gpt_oss_20b_varlen",
+        "rl_grpo_qwen3_5_9b_varlen",
+        "rl_grpo_qwen3_30b_a3b_varlen",
+    ],
+)
+def test_recipe_configs_pickle_for_actor_spawn(recipe):
+    """Actor frameworks pickle the trainer and generator configs (Monarch with cloudpickle);
+    varlen attention configs hold SDPBackend members, which do not pickle on their own."""
+    import cloudpickle
+
+    config = getattr(alphabet_sort, recipe)()
+    for role in (config.trainer, config.generator):
+        # Round-trips without error; configs holding functools.partial never compare equal after it.
+        assert type(cloudpickle.loads(cloudpickle.dumps(role))) is type(role)

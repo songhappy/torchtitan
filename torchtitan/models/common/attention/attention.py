@@ -12,6 +12,7 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
+import copyreg
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
@@ -327,6 +328,17 @@ class VarlenAttentionMetadata(NamedTuple):
         spmd.assert_type(self.cu_seq_q, self._OFFSETS_SPMD_TYPE)
         if self.cu_seq_k is not self.cu_seq_q:
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
+
+
+def _sdp_backend(name: str) -> SDPBackend:
+    """The ``SDPBackend`` member called ``name``; the unpickler for ``SDPBackend``."""
+    return SDPBackend.__members__[name]
+
+
+# SDPBackend is a pybind11 enum exported as torch.nn.attention._SDPBackend, which neither pickle (no
+# attribute of that name) nor cloudpickle (pybind11 internals) can serialize. VarlenInnerAttention.Config
+# holds a list of them, and actor frameworks pickle configs to spawn their processes.
+copyreg.pickle(SDPBackend, lambda backend: (_sdp_backend, (backend.name,)))
 
 
 class VarlenInnerAttention(InnerAttention):
