@@ -164,7 +164,9 @@ Two envs, one per torch (2026-10-26). Both pass the basic regression (18/18).
 
 Upstream main also needs TorchStore with its routing client (#195) and `spmd_types` 0.3.1;
 until `monarch_t215` is upgraded, pass both in: `qsub -v PYTHONPATH=$HOME/git/rebase_deps:$HOME/git/ts_rebase ...`
-(`~/git/ts_rebase` is TorchStore branch `xpu-all-v2`: upstream main plus the five XPU commits).
+(`~/git/ts_rebase` is TorchStore branch `xpu-all-v2`: upstream main plus the six XPU commits; the last makes the
+routing plan read each generator's keys from one replica on XCCL, without which 16 nodes x 12 tiles never finishes
+the first weight pull).
 
 Build on the UAN (login node), never on a compute node. Prerequisites: Aurora access,
 miniforge3, the Qwen3-0.6B weights on a filesystem the compute nodes read, and the
