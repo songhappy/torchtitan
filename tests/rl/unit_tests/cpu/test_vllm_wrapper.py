@@ -247,3 +247,71 @@ def test_vllm_rejects_mla(build_config, attn_backend) -> None:
 
     with pytest.raises(ValueError, match="MLA attention is not supported"):
         _replace_vllm_layer_configs(model_config)
+
+
+class _HookImpl:
+    """Like vLLM's FLEX impl and torchtitan's CUSTOM one: applies ``out_transform``."""
+
+    out_transform = None
+
+
+class _KernelSinksImpl:
+    """Like vLLM's FLASH_ATTN / TRITON_ATTN impls (what vLLM picks on XPU): no hook,
+    the kernel reads ``self.sinks``."""
+
+    def __init__(self) -> None:
+        self.sinks = None
+        self.sinks_seen = []
+
+    def forward(self, query):
+        self.sinks_seen.append(self.sinks)
+        return query
+
+
+def _gpt_oss_attention_on(impl) -> nn.Module:
+    config = importlib.import_module("torchtitan.models.gpt_oss").build_model_config(
+        "debugmodel", seq_len=128, parallelism=ParallelismConfig()
+    )
+    attention = config.layers[0].attention.build()
+    inner = nn.Module()
+    inner.vllm_attn = nn.Module()
+    inner.vllm_attn.impl = impl
+    attention.inner_attention = inner
+    return attention
+
+
+def test_gpt_oss_sinks_reach_a_hook_backend() -> None:
+    impl = _HookImpl()
+    attention = _gpt_oss_attention_on(impl)
+    VLLMModelWrapper._inject_attention_sinks(
+        dataclasses.make_dataclass("W", ["model"])(attention)
+    )
+    num_heads = attention.sinks.numel()
+    nn.init.zeros_(attention.sinks)
+    # sigmoid(lse - sinks) = sigmoid(0) = 0.5
+    out = impl.out_transform(torch.ones(2, num_heads, 4), torch.zeros(2, num_heads))
+    assert torch.equal(out, torch.full((2, num_heads, 4), 0.5))
+
+
+def test_gpt_oss_sinks_reach_a_kernel_backend_on_every_call() -> None:
+    """A hook set on FLASH_ATTN would be ignored; the kernel gets the current sinks instead."""
+    impl = _KernelSinksImpl()
+    attention = _gpt_oss_attention_on(impl)
+    VLLMModelWrapper._inject_attention_sinks(
+        dataclasses.make_dataclass("W", ["model"])(attention)
+    )
+    assert not hasattr(impl, "out_transform")
+    impl.forward(torch.ones(1))
+    assert impl.sinks_seen[-1] is attention.sinks
+    # FSDP swaps the parameter between calls.
+    attention.sinks = nn.Parameter(torch.zeros_like(attention.sinks))
+    impl.forward(torch.ones(1))
+    assert impl.sinks_seen[-1] is attention.sinks
+
+
+def test_gpt_oss_sinks_reject_a_backend_that_cannot_apply_them() -> None:
+    attention = _gpt_oss_attention_on(object())
+    with pytest.raises(ValueError, match="cannot apply gpt-oss attention sinks"):
+        VLLMModelWrapper._inject_attention_sinks(
+            dataclasses.make_dataclass("W", ["model"])(attention)
+        )

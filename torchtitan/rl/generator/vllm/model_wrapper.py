@@ -302,6 +302,17 @@ def _unshard_and_free_sharded_params(module: FSDPModule) -> None:
             free_storage(sharded_data)
 
 
+def _forward_with_sinks(impl: Any, attention: Module) -> Any:
+    """``impl.forward`` that first hands the kernel ``attention``'s current sinks."""
+    forward = impl.forward
+
+    def forward_with_sinks(*args, **kwargs):
+        impl.sinks = attention.sinks
+        return forward(*args, **kwargs)
+
+    return forward_with_sinks
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -577,7 +588,7 @@ class VLLMModelWrapper(Module):
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
-        """Give each gpt-oss attention's vLLM backend its sink-rescale hook."""
+        """Give each gpt-oss attention's vLLM backend its sinks (a rescale hook or the kernel's own)."""
         from torchtitan.models.gpt_oss.model import (
             apply_attention_sink_rescale,
             GptOssAttention,
@@ -586,13 +597,26 @@ class VLLMModelWrapper(Module):
         for module in self.model.modules():
             if not isinstance(module, GptOssAttention):
                 continue
+            impl = module.inner_attention.vllm_attn.impl
             # Read sinks per call: FSDP swaps the parameter between its sharded
             # and unsharded tensors and frees the sharded storage after unsharding.
-            module.inner_attention.vllm_attn.impl.out_transform = (
-                lambda out, lse, attention=module: apply_attention_sink_rescale(
-                    out, lse, attention.sinks
+            if hasattr(impl, "out_transform"):
+                # vLLM's FLEX backend and torchtitan's CUSTOM one apply the hook.
+                impl.out_transform = (
+                    lambda out, lse, attention=module: apply_attention_sink_rescale(
+                        out, lse, attention.sinks
+                    )
                 )
-            )
+            elif hasattr(impl, "sinks"):
+                # The backends vLLM picks on XPU (FLASH_ATTN, TRITON_ATTN) have no
+                # hook; their kernels take the sinks themselves. Setting a hook
+                # there would be silently ignored.
+                impl.forward = _forward_with_sinks(impl, module)
+            else:
+                raise ValueError(
+                    f"vLLM attention impl {type(impl).__name__} cannot apply "
+                    "gpt-oss attention sinks"
+                )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """vLLM required API.
