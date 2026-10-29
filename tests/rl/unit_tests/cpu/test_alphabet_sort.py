@@ -780,6 +780,7 @@ def test_moe_one_trainer_copy_over_8_hosts_and_one_engine_per_generator_host(
     ) == engine
     assert config.num_generators == 8
     assert config.trainer.checkpointer.load_only
+    assert "bit_wise/" in config.metrics.console_log_keys_train
     plan = plan_host_meshes(
         _FakeHosts(list(range(16))),
         trainer_world_size=8 * tiles,

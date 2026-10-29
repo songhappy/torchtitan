@@ -1026,6 +1026,14 @@ def _rl_grpo_qwen3_0_6b_hosts(
     return _finish_qwen3_0_6b(config, arm, steps)
 
 
+def _print_logprob_parity(config: Controller.Config) -> None:
+    """Print every ``bit_wise/`` metric, not just the max: the mean log-ratio (k1 estimate of -KL) and the
+    fraction of tokens whose logprobs differ tell a few outlier tokens from a systematic gap."""
+    keys = config.metrics.console_log_keys_train
+    if keys is not None and "bit_wise/" not in keys:
+        keys.append("bit_wise/")
+
+
 def _finish_qwen3_0_6b(
     config: Controller.Config, arm: str, steps: int
 ) -> Controller.Config:
@@ -1037,6 +1045,7 @@ def _finish_qwen3_0_6b(
     config.async_loop.validation.steps = 0
     assert config.trainer.checkpointer is not None
     config.trainer.checkpointer.load_only = True
+    _print_logprob_parity(config)
     if arm == "lora":
         # Both sides get the adapters, so the state dict the generator pulls matches.
         lora = LoRATransform(rank=32, alpha=64.0, target_modules=["wqkv", "wo"])
@@ -1354,6 +1363,7 @@ def _rl_grpo_flex_hosts(
     # never finishes (only rank 0's shard lands) and the engines hit gloo's 30-min timeout.
     assert config.trainer.checkpointer is not None
     config.trainer.checkpointer.load_only = True
+    _print_logprob_parity(config)
     return config
 
 
