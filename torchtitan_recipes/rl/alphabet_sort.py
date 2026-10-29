@@ -1423,8 +1423,10 @@ for _recipe, (_tiles, _engine, _copies) in _ONE_ENGINE_PER_HOST.items():
 # some hosts hangs. FSDP shards must divide the expert count: gpt-oss 32 -> 4 tiles per host (1 x 32, TP-4 x EP-4
 # engines); 30B-A3B 128 -> 1 x 64. (tiles per host, generator (TP, DP, EP), generator memory limit)
 _MOE_ONE_TRAINER_COPY = {
-    "rl_grpo_gpt_oss_20b_varlen": (4, (4, 1, 4), None),
-    # At the default 0.9 every 30B-A3B engine failed its first forward (UR_RESULT_ERROR_OUT_OF_RESOURCES).
+    # Engines held to 0.7 of each tile: loading pulled weights holds the sharded and the unsharded copy at once
+    # (~10 GiB each per tile here), which vLLM's KV-cache sizing does not count; at the default 0.9 the load or the
+    # first forward fails with UR_RESULT_ERROR_OUT_OF_RESOURCES.
+    "rl_grpo_gpt_oss_20b_varlen": (4, (4, 1, 4), 0.7),
     "rl_grpo_qwen3_30b_a3b_varlen": (8, (4, 2, 8), 0.7),
 }
 
