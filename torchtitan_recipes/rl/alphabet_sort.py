@@ -1230,13 +1230,15 @@ def _rl_grpo_flex_hosts(
     one_copy: bool,
     trainer_hosts: int | None = None,
     num_generators: int | None = None,
+    generator_layout: tuple[int, int, int] | None = None,
 ) -> Controller.Config:
     """``recipe``'s flex variant laid out on ``num_hosts`` x ``gpus_per_host``.
 
     ``trainer_hosts`` (default half the hosts) train with FSDP only (TP 1, EP 1): one copy
     per host or, with ``one_copy``, a single copy over every trainer rank. The other hosts
     run ``num_generators`` of the recipe's generator engines (default: as many as fit).
-    Batch, steps and the generator engine stay the recipe's.
+    ``generator_layout`` = (TP, DP, EP) resizes the engine; by default it stays the recipe's.
+    Batch and steps stay the recipe's.
     """
     config = _with_flex_attention(recipe)
     _, builder, flavor = _FLEX_ATTENTION_RECIPES[recipe]
@@ -1259,6 +1261,14 @@ def _rl_grpo_flex_hosts(
                 f"{recipe}: {what} {size} does not split into {shards} FSDP shards"
             )
     generator_parallelism = config.generator.parallelism
+    if generator_layout is not None:
+        tp, dp, ep = generator_layout
+        generator_parallelism = dataclasses.replace(
+            generator_parallelism,
+            tensor_parallel_degree=tp,
+            data_parallel_degree=dp,
+            expert_parallel_degree=ep,
+        )
     trainer_model, generator_model = build_rl_model_configs(
         builder,
         flavor,
@@ -1279,7 +1289,9 @@ def _rl_grpo_flex_hosts(
         model=trainer_model,
         activation_remat=FullActivationRematConfig(),
     )
-    config.generator = dataclasses.replace(config.generator, model=generator_model)
+    config.generator = dataclasses.replace(
+        config.generator, parallelism=generator_parallelism, model=generator_model
+    )
     if num_generators is None:
         num_generators = (num_hosts - trainer_hosts) * (gpus_per_host // engine_gpus)
     config.num_generators = num_generators
@@ -1316,6 +1328,34 @@ for _recipe, _layout_tiles in _FLEX_16_HOST_TILES.items():
             trainer_hosts=8,
             num_generators=1,
         )
+
+# ..._flex_16n_ppn<P>_gen_c<G>_10steps (layout A): one trainer copy per host on 8 hosts and the generator
+# engines on the other 8, one per host where an engine fills a host. The engine is as large as one host allows: TP 8
+# where the 8 KV heads allow it, TP 4 for the 4-KV-head models (30B-A3B adds DP 2 for EP 8). Qwen3.5-9B runs on
+# 4-tile hosts so its TP-4 engine fills one (8 x 4 trainer); Qwen3.6-27B cannot (one copy on 4 tiles is ~108 GB
+# per tile), so it keeps 8 tiles and runs two TP-4 engines per host: 16 generator copies. recipe ->
+# (tiles per host, (TP, DP, EP), generator copies).
+_ONE_ENGINE_PER_HOST = {
+    "rl_grpo_qwen3_1_7b": (8, (8, 1, 1), 8),
+    "rl_grpo_qwen3_14b": (8, (8, 1, 1), 8),
+    "rl_grpo_gpt_oss_20b_varlen": (8, (8, 1, 8), 8),
+    "rl_grpo_qwen3_30b_a3b_varlen": (8, (4, 2, 8), 8),
+    "rl_grpo_qwen3_5_9b_varlen": (4, (4, 1, 1), 8),
+    "rl_grpo_qwen3_6_27b_varlen_perf": (8, (4, 1, 1), 16),
+}
+for _recipe, (_tiles, _engine, _copies) in _ONE_ENGINE_PER_HOST.items():
+    globals()[
+        f"{_FLEX_ATTENTION_RECIPES[_recipe][0]}_16n_ppn{_tiles}_gen_c{_copies}_10steps"
+    ] = functools.partial(
+        _rl_grpo_flex_hosts,
+        _recipe,
+        16,
+        _tiles,
+        one_copy=False,
+        trainer_hosts=8,
+        num_generators=_copies,
+        generator_layout=_engine,
+    )
 
 # ..._flex_<N>n_ppn<P>_gen_c8_10steps: one trainer copy per host on 8 hosts and as many generator copies (8 of the
 # recipe's engines) on the fewest hosts they fit, so both sides hold the same number of copies.

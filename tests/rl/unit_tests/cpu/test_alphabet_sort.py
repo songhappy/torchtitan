@@ -684,3 +684,45 @@ def test_larger_models_with_as_many_generator_copies_as_trainer_copies(
     assert sorted({h for m in plan.generators for h in m.hosts}) == list(
         range(8, hosts)
     )
+
+
+@pytest.mark.parametrize(
+    ("name", "tiles", "engine", "copies"),
+    [
+        ("rl_grpo_qwen3_1_7b_flex", 8, (8, 1, 1), 8),
+        ("rl_grpo_qwen3_14b_flex", 8, (8, 1, 1), 8),
+        ("rl_grpo_gpt_oss_20b_flex", 8, (8, 1, 8), 8),
+        ("rl_grpo_qwen3_30b_a3b_flex", 8, (4, 2, 8), 8),
+        ("rl_grpo_qwen3_5_9b_flex", 4, (4, 1, 1), 8),
+        ("rl_grpo_qwen3_6_27b_flex_perf", 8, (4, 1, 1), 16),
+    ],
+)
+def test_layout_a_one_trainer_copy_per_host_and_engines_on_all_8_generator_hosts(
+    name, tiles, engine, copies
+):
+    """16 hosts: 8 trainer copies on hosts 0-7, the generator engines spread over all of hosts 8-15."""
+    import cloudpickle
+
+    config = getattr(alphabet_sort, f"{name}_16n_ppn{tiles}_gen_c{copies}_10steps")()
+    p, g = config.trainer.parallelism, config.generator.parallelism
+    assert (p.data_parallel_replicate_degree, p.data_parallel_shard_degree) == (
+        8,
+        tiles,
+    )
+    assert (
+        g.tensor_parallel_degree,
+        g.data_parallel_degree,
+        g.expert_parallel_degree,
+    ) == engine
+    assert config.num_generators == copies
+    plan = plan_host_meshes(
+        _FakeHosts(list(range(16))),
+        trainer_world_size=8 * tiles,
+        per_generator_world_size=engine[0] * engine[1],
+        num_generators=copies,
+        gpus_per_node=tiles,
+    )
+    assert plan.trainer.hosts == list(range(8))
+    assert sorted({h for m in plan.generators for h in m.hosts}) == list(range(8, 16))
+    cloudpickle.dumps(config.trainer)
+    cloudpickle.dumps(config.generator)
