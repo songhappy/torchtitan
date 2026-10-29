@@ -1175,13 +1175,18 @@ _FLEX_ATTENTION_RECIPES = {
 
 
 def _with_flex_attention(recipe: str) -> Controller.Config:
-    """``recipe``'s layout and training settings with flex attention in its models."""
+    """``recipe``'s layout and training settings with flex attention in its models.
+
+    The models are built at the recipe's training length, which is also their own context
+    length in every recipe but ``rl_grpo_qwen3_6_27b_varlen_perf``: that one builds a
+    65536-token model while training at 2048, which the trainer rejects.
+    """
     config = globals()[recipe]()
     _, builder, flavor = _FLEX_ATTENTION_RECIPES[recipe]
     trainer_model, generator_model = build_rl_model_configs(
         builder,
         flavor,
-        seq_len=config.trainer.model.max_context_length,
+        seq_len=config.trainer.training.max_context_length,
         attn_backend="flex",
         trainer_parallelism=config.trainer.parallelism,
         generator_parallelism=config.generator.parallelism,
