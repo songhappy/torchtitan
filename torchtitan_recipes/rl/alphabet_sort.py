@@ -1250,8 +1250,13 @@ def _rl_grpo_flex_hosts(
         generator_parallelism.tensor_parallel_degree
         * generator_parallelism.data_parallel_degree
     )
+    # Full activation remat, as upstream's larger recipes use: with the default policy a 14B copy over 8 tiles
+    # runs out of device memory in step 2 (UR_RESULT_ERROR_OUT_OF_RESOURCES).
     config.trainer = dataclasses.replace(
-        config.trainer, parallelism=trainer_parallelism, model=trainer_model
+        config.trainer,
+        parallelism=trainer_parallelism,
+        model=trainer_model,
+        activation_remat=FullActivationRematConfig(),
     )
     config.generator = dataclasses.replace(config.generator, model=generator_model)
     config.num_generators = (num_hosts - trainer_hosts) * (gpus_per_host // engine_gpus)
