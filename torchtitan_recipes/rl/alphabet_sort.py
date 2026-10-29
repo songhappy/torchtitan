@@ -1412,6 +1412,21 @@ for _recipe, (_tiles, _engine, _copies) in _ONE_ENGINE_PER_HOST.items():
         generator_layout=_engine,
     )
 
+
+def _with_max_tokens(name: str, max_tokens: int) -> Controller.Config:
+    """``name``'s config with a larger generation budget (gpt-oss reasons in its analysis channel first)."""
+    config = globals()[name]()
+    config.generator.sampling = dataclasses.replace(
+        config.generator.sampling, max_tokens=max_tokens
+    )
+    return config
+
+
+# ..._maxtok1800: gpt-oss layout A with room to finish reasoning (the recipe's 700 tokens left every answer empty).
+rl_grpo_gpt_oss_20b_flex_16n_ppn8_gen_c8_maxtok1800_10steps = functools.partial(
+    _with_max_tokens, "rl_grpo_gpt_oss_20b_flex_16n_ppn8_gen_c8_10steps", 1800
+)
+
 # ..._flex_<N>n_ppn<P>_gen_c8_10steps: one trainer copy per host on 8 hosts and as many generator copies (8 of the
 # recipe's engines) on the fewest hosts they fit, so both sides hold the same number of copies.
 _ENGINE_TILES = {
