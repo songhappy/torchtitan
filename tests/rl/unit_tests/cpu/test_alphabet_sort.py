@@ -585,18 +585,20 @@ def test_flex_variants_keep_the_upstream_layout(recipe, flex_recipe):
 @pytest.mark.parametrize(
     ("name", "tiles"),
     [
-        ("rl_grpo_qwen3_1_7b_flex", 12),
-        ("rl_grpo_qwen3_5_9b_flex", 12),
-        ("rl_grpo_gpt_oss_20b_flex", 12),
-        ("rl_grpo_qwen3_30b_a3b_flex", 12),
-        ("rl_grpo_qwen3_14b_flex", 8),
-        ("rl_grpo_qwen3_6_27b_flex_perf", 8),
+        ("rl_grpo_qwen3_1_7b_flex", (12, 12)),
+        ("rl_grpo_qwen3_5_9b_flex", (12, 12)),
+        ("rl_grpo_gpt_oss_20b_flex", (8, 4)),
+        ("rl_grpo_qwen3_30b_a3b_flex", (8, 8)),
+        ("rl_grpo_qwen3_14b_flex", (8, 8)),
+        ("rl_grpo_qwen3_6_27b_flex_perf", (8, 8)),
     ],
 )
 @pytest.mark.parametrize("one_copy", [False, True])
 def test_larger_models_on_16_hosts(name, tiles, one_copy):
     """One copy per trainer host or one copy over all 8 trainer hosts, generators on the other 8."""
     import cloudpickle
+
+    tiles = tiles[1] if one_copy else tiles[0]
 
     suffix = "_trn_c1" if one_copy else ""
     config = getattr(alphabet_sort, f"{name}_16n_ppn{tiles}{suffix}_10steps")()
@@ -622,17 +624,18 @@ def test_larger_models_on_16_hosts(name, tiles, one_copy):
 @pytest.mark.parametrize(
     ("name", "tiles"),
     [
-        ("rl_grpo_qwen3_1_7b_flex", 12),
-        ("rl_grpo_qwen3_5_9b_flex", 12),
-        ("rl_grpo_gpt_oss_20b_flex", 12),
-        ("rl_grpo_qwen3_30b_a3b_flex", 12),
-        ("rl_grpo_qwen3_14b_flex", 8),
-        ("rl_grpo_qwen3_6_27b_flex_perf", 8),
+        ("rl_grpo_qwen3_1_7b_flex", (12, 12)),
+        ("rl_grpo_qwen3_5_9b_flex", (12, 12)),
+        ("rl_grpo_gpt_oss_20b_flex", (8, 4)),
+        ("rl_grpo_qwen3_30b_a3b_flex", (8, 8)),
+        ("rl_grpo_qwen3_14b_flex", (8, 8)),
+        ("rl_grpo_qwen3_6_27b_flex_perf", (8, 8)),
     ],
 )
 @pytest.mark.parametrize("one_copy", [False, True])
 def test_larger_models_on_9_hosts_keep_one_generator_engine(name, tiles, one_copy):
     """The trainer layouts of the 16-host runs on 8 hosts; one recipe engine on the 9th."""
+    tiles = tiles[1] if one_copy else tiles[0]
     suffix = "_trn_c1" if one_copy else ""
     config = getattr(alphabet_sort, f"{name}_9n_ppn{tiles}{suffix}_10steps")()
     p = config.trainer.parallelism

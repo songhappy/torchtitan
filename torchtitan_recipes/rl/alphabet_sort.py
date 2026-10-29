@@ -1201,6 +1201,16 @@ for _recipe, (_flex_name, _, _) in _FLEX_ATTENTION_RECIPES.items():
     globals()[_flex_name] = functools.partial(_with_flex_attention, _recipe)
 
 
+def _num_experts(model: Decoder.Config) -> int | None:
+    """Routed experts per MoE layer, None for a dense model.
+
+    The MoE state-dict adapter shards the expert weights on dim 0 (the expert count) when
+    it loads a checkpoint, so the FSDP shard count must divide it.
+    """
+    layer = model.layers[0] if isinstance(model.layers, (list, tuple)) else model.layers
+    return getattr(getattr(layer, "moe", None), "num_experts", None)
+
+
 def _stacked_ffn_dim(model: Decoder.Config) -> int | None:
     """The FFN width of a dense model's stacked ``w13`` weight, None for MoE layers.
 
@@ -1238,12 +1248,15 @@ def _rl_grpo_flex_hosts(
         data_parallel_shard_degree=trainer_gpus // replicas,
         tensor_parallel_degree=1,
     )
-    ffn = _stacked_ffn_dim(config.trainer.model)
-    if ffn is not None and ffn % trainer_parallelism.data_parallel_shard_degree:
-        raise ValueError(
-            f"{recipe}: FFN width {ffn} does not split into "
-            f"{trainer_parallelism.data_parallel_shard_degree} FSDP shards"
-        )
+    shards = trainer_parallelism.data_parallel_shard_degree
+    for what, size in (
+        ("FFN width", _stacked_ffn_dim(config.trainer.model)),
+        ("expert count", _num_experts(config.trainer.model)),
+    ):
+        if size is not None and size % shards:
+            raise ValueError(
+                f"{recipe}: {what} {size} does not split into {shards} FSDP shards"
+            )
     generator_parallelism = config.generator.parallelism
     trainer_model, generator_model = build_rl_model_configs(
         builder,
@@ -1272,22 +1285,24 @@ def _rl_grpo_flex_hosts(
     return config
 
 
-# ..._flex_16n_ppn<P>_10steps (one copy per trainer host) and ..._trn_c1_10steps (one copy over all
-# trainer ranks): the larger models on 16 hosts. P = 12 unless the dense FFN width (17408 for
-# Qwen3-14B / 3.6-27B = 2^10 x 17) only splits into powers of two, then 8 (8 x 8 and 1 x 64).
+# ..._flex_16n_ppn<P>_10steps / ..._flex_9n_ppn<P>_10steps (one copy per trainer host) and ..._trn_c1_10steps
+# (one copy over all trainer ranks): the larger models on 8 trainer hosts. P is the tiles per host that both FSDP
+# shard counts (P per copy, or 8P for one copy) divide: the dense FFN width (17408 = 2^10 x 17 for Qwen3-14B / 3.6-27B)
+# and the MoE expert count (128 for 30B-A3B, 32 for gpt-oss-20b, so 1 x 32 there). (per-host copy, one copy) tiles.
 _FLEX_16_HOST_TILES = {
-    "rl_grpo_qwen3_1_7b": 12,
-    "rl_grpo_qwen3_5_9b_varlen": 12,
-    "rl_grpo_gpt_oss_20b_varlen": 12,
-    "rl_grpo_qwen3_30b_a3b_varlen": 12,
-    "rl_grpo_qwen3_14b": 8,
-    "rl_grpo_qwen3_6_27b_varlen_perf": 8,
+    "rl_grpo_qwen3_1_7b": (12, 12),
+    "rl_grpo_qwen3_5_9b_varlen": (12, 12),
+    "rl_grpo_gpt_oss_20b_varlen": (8, 4),
+    "rl_grpo_qwen3_30b_a3b_varlen": (8, 8),
+    "rl_grpo_qwen3_14b": (8, 8),
+    "rl_grpo_qwen3_6_27b_varlen_perf": (8, 8),
 }
-# ..._flex_9n_ppn<P>[_trn_c1]_10steps: the same two trainer layouts on 8 hosts with the generator at
-# upstream's default, the recipe's one engine on the 9th host -- the trainer is the side under test.
-for _recipe, _tiles in _FLEX_16_HOST_TILES.items():
+for _recipe, _layout_tiles in _FLEX_16_HOST_TILES.items():
     _flex_name = _FLEX_ATTENTION_RECIPES[_recipe][0]
-    for _one_copy, _suffix in ((False, ""), (True, "_trn_c1")):
+    for _one_copy, _suffix, _tiles in (
+        (False, "", _layout_tiles[0]),
+        (True, "_trn_c1", _layout_tiles[1]),
+    ):
         globals()[f"{_flex_name}_16n_ppn{_tiles}{_suffix}_10steps"] = functools.partial(
             _rl_grpo_flex_hosts, _recipe, 16, _tiles, one_copy=_one_copy
         )
