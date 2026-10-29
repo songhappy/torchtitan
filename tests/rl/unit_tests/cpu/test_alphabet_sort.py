@@ -540,3 +540,43 @@ def test_recipe_configs_pickle_for_actor_spawn(recipe):
     for role in (config.trainer, config.generator):
         # Round-trips without error; configs holding functools.partial never compare equal after it.
         assert type(cloudpickle.loads(cloudpickle.dumps(role))) is type(role)
+
+
+@pytest.mark.parametrize(
+    "recipe,flex_recipe",
+    [(r, n) for r, (n, _, _) in alphabet_sort._FLEX_ATTENTION_RECIPES.items()],
+)
+def test_flex_variants_keep_the_upstream_layout(recipe, flex_recipe):
+    """A _flex recipe is its upstream recipe with varlen attention replaced by flex."""
+    upstream = getattr(alphabet_sort, recipe)()
+    flex = getattr(alphabet_sort, flex_recipe)()
+
+    def inner_attentions(config):
+        return [
+            type(layer.attention.inner_attention).__qualname__
+            for layer in config.model.layers
+            if hasattr(layer, "attention")
+            and hasattr(layer.attention, "inner_attention")
+        ]
+
+    for role in ("trainer", "generator"):
+        was = inner_attentions(getattr(upstream, role))
+        now = inner_attentions(getattr(flex, role))
+        assert any("Varlen" in name for name in was), f"{recipe} {role} is not varlen"
+        assert not any("Varlen" in name for name in now)
+        # Each varlen attention becomes its flex counterpart (plain and sliding-window);
+        # layers of another kind, e.g. GDN linear attention, keep theirs.
+        assert now == [name.replace("Varlen", "Flex") for name in was]
+        # The builder gives every attention its sharding config; a bare config has none.
+        assert all(
+            layer.attention.inner_attention.sharding_config is not None
+            for layer in getattr(flex, role).model.layers
+            if hasattr(layer, "attention")
+            and hasattr(layer.attention, "inner_attention")
+        )
+
+    # Layout and training settings are the upstream recipe's.
+    assert flex.trainer.parallelism == upstream.trainer.parallelism
+    assert flex.generator.parallelism == upstream.generator.parallelism
+    assert flex.num_generators == upstream.num_generators
+    assert flex.async_loop == upstream.async_loop

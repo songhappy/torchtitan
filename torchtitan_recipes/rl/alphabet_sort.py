@@ -1142,3 +1142,55 @@ for _arm in ("full", "lora"):
     globals()[f"rl_grpo_qwen3_0_6b_{_arm}_8n_ppn12_1000steps"] = functools.partial(
         _rl_grpo_qwen3_0_6b_hosts, _arm, 8, 12, 1000
     )
+
+
+# ..._flex...: an upstream recipe with its models rebuilt on flex attention, everything else
+# unchanged. torch's varlen_attn calls aten::_flash_attention_forward, which torch-xpu-ops does
+# not implement, so the varlen recipes cannot train on XPU; flex attention runs there.
+# (recipe -> (flex name, model builder, flavor)); every one of them uses seq_len 2048 and no converters.
+_FLEX_ATTENTION_RECIPES = {
+    "rl_grpo_qwen3_1_7b": ("rl_grpo_qwen3_1_7b_flex", build_model_config, "1.7B"),
+    "rl_grpo_qwen3_14b": ("rl_grpo_qwen3_14b_flex", build_model_config, "14B"),
+    "rl_grpo_qwen3_30b_a3b_varlen": (
+        "rl_grpo_qwen3_30b_a3b_flex",
+        build_model_config,
+        "30B-A3B",
+    ),
+    "rl_grpo_gpt_oss_20b_varlen": (
+        "rl_grpo_gpt_oss_20b_flex",
+        build_gpt_oss_model_config,
+        "20b",
+    ),
+    "rl_grpo_qwen3_5_9b_varlen": (
+        "rl_grpo_qwen3_5_9b_flex",
+        build_qwen3_5_model_config,
+        "9B",
+    ),
+    "rl_grpo_qwen3_6_27b_varlen_perf": (
+        "rl_grpo_qwen3_6_27b_flex_perf",
+        build_qwen3_5_model_config,
+        "27B",
+    ),
+}
+
+
+def _with_flex_attention(recipe: str) -> Controller.Config:
+    """``recipe``'s layout and training settings with flex attention in its models."""
+    config = globals()[recipe]()
+    _, builder, flavor = _FLEX_ATTENTION_RECIPES[recipe]
+    trainer_model, generator_model = build_rl_model_configs(
+        builder,
+        flavor,
+        seq_len=config.trainer.model.max_context_length,
+        attn_backend="flex",
+        trainer_parallelism=config.trainer.parallelism,
+        generator_parallelism=config.generator.parallelism,
+    )
+    # replace() so each role's config revalidates against its new model.
+    config.trainer = dataclasses.replace(config.trainer, model=trainer_model)
+    config.generator = dataclasses.replace(config.generator, model=generator_model)
+    return config
+
+
+for _recipe, (_flex_name, _, _) in _FLEX_ATTENTION_RECIPES.items():
+    globals()[_flex_name] = functools.partial(_with_flex_attention, _recipe)
