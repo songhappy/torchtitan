@@ -13,6 +13,7 @@ Each function returns a complete ``Controller.Config``, discoverable by
 
 import dataclasses
 import functools
+import math
 
 from renderers import GptOssRendererConfig, Qwen3RendererConfig
 
@@ -1315,3 +1316,26 @@ for _recipe, _layout_tiles in _FLEX_16_HOST_TILES.items():
             trainer_hosts=8,
             num_generators=1,
         )
+
+# ..._flex_<N>n_ppn<P>_gen_c8_10steps: one trainer copy per host on 8 hosts and as many generator copies (8 of the
+# recipe's engines) on the fewest hosts they fit, so both sides hold the same number of copies.
+_ENGINE_TILES = {
+    "rl_grpo_qwen3_1_7b": 4,
+    "rl_grpo_qwen3_5_9b_varlen": 2,
+    "rl_grpo_gpt_oss_20b_varlen": 4,
+    "rl_grpo_qwen3_30b_a3b_varlen": 4,
+    "rl_grpo_qwen3_14b": 8,
+    "rl_grpo_qwen3_6_27b_varlen_perf": 4,
+}
+for _recipe, (_tiles, _) in _FLEX_16_HOST_TILES.items():
+    _generator_hosts = math.ceil(8 / (_tiles // _ENGINE_TILES[_recipe]))
+    _name = f"{_FLEX_ATTENTION_RECIPES[_recipe][0]}_{8 + _generator_hosts}n_ppn{_tiles}_gen_c8_10steps"
+    globals()[_name] = functools.partial(
+        _rl_grpo_flex_hosts,
+        _recipe,
+        8 + _generator_hosts,
+        _tiles,
+        one_copy=False,
+        trainer_hosts=8,
+        num_generators=8,
+    )

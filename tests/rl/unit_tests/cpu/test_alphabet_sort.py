@@ -653,3 +653,34 @@ def test_larger_models_on_9_hosts_keep_one_generator_engine(name, tiles, one_cop
     )
     assert plan.trainer.hosts == list(range(8))
     assert plan.generators[0].hosts == [8]
+
+
+@pytest.mark.parametrize(
+    ("name", "hosts", "tiles", "engine"),
+    [
+        ("rl_grpo_qwen3_1_7b_flex", 11, 12, 4),
+        ("rl_grpo_qwen3_5_9b_flex", 10, 12, 2),
+        ("rl_grpo_gpt_oss_20b_flex", 12, 8, 4),
+        ("rl_grpo_qwen3_30b_a3b_flex", 12, 8, 4),
+        ("rl_grpo_qwen3_14b_flex", 16, 8, 8),
+        ("rl_grpo_qwen3_6_27b_flex_perf", 12, 8, 4),
+    ],
+)
+def test_larger_models_with_as_many_generator_copies_as_trainer_copies(
+    name, hosts, tiles, engine
+):
+    """8 trainer copies (one per host) and 8 generator engines on the fewest hosts they fit."""
+    config = getattr(alphabet_sort, f"{name}_{hosts}n_ppn{tiles}_gen_c8_10steps")()
+    assert config.trainer.parallelism.data_parallel_replicate_degree == 8
+    assert config.num_generators == 8
+    plan = plan_host_meshes(
+        _FakeHosts(list(range(hosts))),
+        trainer_world_size=8 * tiles,
+        per_generator_world_size=engine,
+        num_generators=8,
+        gpus_per_node=tiles,
+    )
+    assert plan.trainer.hosts == list(range(8))
+    assert sorted({h for m in plan.generators for h in m.hosts}) == list(
+        range(8, hosts)
+    )
