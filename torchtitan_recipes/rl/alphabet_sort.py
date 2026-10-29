@@ -1212,18 +1212,25 @@ def _stacked_ffn_dim(model: Decoder.Config) -> int | None:
 
 
 def _rl_grpo_flex_hosts(
-    recipe: str, num_hosts: int, gpus_per_host: int, *, one_copy: bool
+    recipe: str,
+    num_hosts: int,
+    gpus_per_host: int,
+    *,
+    one_copy: bool,
+    trainer_hosts: int | None = None,
+    num_generators: int | None = None,
 ) -> Controller.Config:
     """``recipe``'s flex variant laid out on ``num_hosts`` x ``gpus_per_host``.
 
-    Half the hosts train with FSDP only (TP 1, EP 1): one copy per host
-    (``num_hosts / 2`` x ``gpus_per_host``) or, with ``one_copy``, a single copy over every
-    trainer rank. The other half run the recipe's generator engines, as many as fit.
-    Batch, steps and the generator layout stay the recipe's.
+    ``trainer_hosts`` (default half the hosts) train with FSDP only (TP 1, EP 1): one copy
+    per host or, with ``one_copy``, a single copy over every trainer rank. The other hosts
+    run ``num_generators`` of the recipe's generator engines (default: as many as fit).
+    Batch, steps and the generator engine stay the recipe's.
     """
     config = _with_flex_attention(recipe)
     _, builder, flavor = _FLEX_ATTENTION_RECIPES[recipe]
-    trainer_hosts = num_hosts // 2
+    if trainer_hosts is None:
+        trainer_hosts = num_hosts // 2
     trainer_gpus = trainer_hosts * gpus_per_host
     replicas = 1 if one_copy else trainer_hosts
     trainer_parallelism = ParallelismConfig(
@@ -1259,7 +1266,9 @@ def _rl_grpo_flex_hosts(
         activation_remat=FullActivationRematConfig(),
     )
     config.generator = dataclasses.replace(config.generator, model=generator_model)
-    config.num_generators = (num_hosts - trainer_hosts) * (gpus_per_host // engine_gpus)
+    if num_generators is None:
+        num_generators = (num_hosts - trainer_hosts) * (gpus_per_host // engine_gpus)
+    config.num_generators = num_generators
     return config
 
 
@@ -1274,9 +1283,20 @@ _FLEX_16_HOST_TILES = {
     "rl_grpo_qwen3_14b": 8,
     "rl_grpo_qwen3_6_27b_varlen_perf": 8,
 }
+# ..._flex_9n_ppn<P>[_trn_c1]_10steps: the same two trainer layouts on 8 hosts with the generator at
+# upstream's default, the recipe's one engine on the 9th host -- the trainer is the side under test.
 for _recipe, _tiles in _FLEX_16_HOST_TILES.items():
     _flex_name = _FLEX_ATTENTION_RECIPES[_recipe][0]
     for _one_copy, _suffix in ((False, ""), (True, "_trn_c1")):
         globals()[f"{_flex_name}_16n_ppn{_tiles}{_suffix}_10steps"] = functools.partial(
             _rl_grpo_flex_hosts, _recipe, 16, _tiles, one_copy=_one_copy
+        )
+        globals()[f"{_flex_name}_9n_ppn{_tiles}{_suffix}_10steps"] = functools.partial(
+            _rl_grpo_flex_hosts,
+            _recipe,
+            9,
+            _tiles,
+            one_copy=_one_copy,
+            trainer_hosts=8,
+            num_generators=1,
         )
