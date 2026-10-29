@@ -1154,9 +1154,10 @@ for _arm in ("full", "lora"):
 # One side scales with the other at its default on one full host, and the side under test is one copy.
 # Trainer (12 TP-1 generator engines on the last host): ..._2n_ppn12_trn_t<A>, one copy on A tiles of one
 # host; ..._<G+1>n_ppn12_trn_n<G>, one copy over G full hosts. Generator (a 1 x 12 trainer on the first
-# host): ..._2n_ppn12_gen_t<A>, one engine of TP A; ..._3n_ppn12_gen_n2, one TP-16 engine over 2 hosts (8
-# tiles each). A dense engine grows only through TP (generator data_parallel_degree > 1 is for expert
-# parallelism) and Qwen3-0.6B's 16 heads cap TP at 16, so 2 hosts is as far as one dense engine spans.
+# host): ..._2n_ppn12_gen_t<A>, one engine of TP A. A dense engine grows only through TP (generator
+# data_parallel_degree > 1 is for expert parallelism), and TP must divide the 8 KV heads, so TP <= 8: to span
+# hosts at all, an engine needs hosts of 4 tiles -- ..._3n_ppn4_gen_n2, one TP-8 engine over 2 hosts (a 1 x 4
+# trainer on the first), and ..._9n_ppn4_gen_n2x4, four of them on 8 hosts.
 _ONE_SIDE = {}
 for _a in (1, 2, 4, 8, 12):
     _ONE_SIDE[f"2n_ppn12_trn_t{_a}"] = dict(
@@ -1170,12 +1171,11 @@ for _a in (1, 2, 4, 8):
     _ONE_SIDE[f"2n_ppn12_gen_t{_a}"] = dict(
         trainer_gpus=12, generator_tp=_a, generator_dp=1, num_generators=1
     )
-_ONE_SIDE["3n_ppn12_gen_n2"] = dict(
-    trainer_gpus=12, generator_tp=16, generator_dp=1, num_generators=1
+_ONE_SIDE["3n_ppn4_gen_n2"] = dict(
+    trainer_gpus=4, generator_tp=8, generator_dp=1, num_generators=1
 )
-# ..._9n_ppn12_gen_n2x4: four of those TP-16 engines on 8 hosts, so several cross-host TP groups run at once.
-_ONE_SIDE["9n_ppn12_gen_n2x4"] = dict(
-    trainer_gpus=12, generator_tp=16, generator_dp=1, num_generators=4
+_ONE_SIDE["9n_ppn4_gen_n2x4"] = dict(
+    trainer_gpus=4, generator_tp=8, generator_dp=1, num_generators=4
 )
 for _arm in ("full", "lora"):
     for _layout, _sizes in _ONE_SIDE.items():

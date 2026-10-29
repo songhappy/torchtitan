@@ -500,8 +500,8 @@ def test_upstream_layout_and_seeded_long_runs() -> None:
         ("5n_ppn12_trn_n4", 5, (1, 48), 12, 1, [0, 1, 2, 3], [4]),
         ("9n_ppn12_trn_n8", 9, (1, 96), 12, 1, list(range(8)), [8]),
         ("2n_ppn12_gen_t8", 2, (1, 12), 1, 8, [0], [1]),
-        ("3n_ppn12_gen_n2", 3, (1, 12), 1, 16, [0], [1, 2]),
-        ("9n_ppn12_gen_n2x4", 9, (1, 12), 4, 16, [0], list(range(1, 9))),
+        ("3n_ppn4_gen_n2", 3, (1, 4), 1, 8, [0], [1, 2]),
+        ("9n_ppn4_gen_n2x4", 9, (1, 4), 4, 8, [0], list(range(1, 9))),
     ],
 )
 def test_one_side_is_one_copy_and_the_other_is_at_its_default(
@@ -529,7 +529,7 @@ def test_one_side_is_one_copy_and_the_other_is_at_its_default(
         trainer_world_size=trainer[0] * trainer[1],
         per_generator_world_size=engine_tp,
         num_generators=engines,
-        gpus_per_node=12,
+        gpus_per_node=int(layout.split("_ppn")[1].split("_")[0]),
     )
     assert plan.trainer.hosts == trainer_hosts
     assert sorted({h for m in plan.generators for h in m.hosts}) == generator_hosts
