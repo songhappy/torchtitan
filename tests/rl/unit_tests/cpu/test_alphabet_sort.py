@@ -580,3 +580,40 @@ def test_flex_variants_keep_the_upstream_layout(recipe, flex_recipe):
     assert flex.generator.parallelism == upstream.generator.parallelism
     assert flex.num_generators == upstream.num_generators
     assert flex.async_loop == upstream.async_loop
+
+
+@pytest.mark.parametrize(
+    ("name", "tiles"),
+    [
+        ("rl_grpo_qwen3_1_7b_flex", 12),
+        ("rl_grpo_qwen3_5_9b_flex", 12),
+        ("rl_grpo_gpt_oss_20b_flex", 12),
+        ("rl_grpo_qwen3_30b_a3b_flex", 12),
+        ("rl_grpo_qwen3_14b_flex", 8),
+        ("rl_grpo_qwen3_6_27b_flex_perf", 8),
+    ],
+)
+@pytest.mark.parametrize("one_copy", [False, True])
+def test_larger_models_on_16_hosts(name, tiles, one_copy):
+    """One copy per trainer host or one copy over all 8 trainer hosts, generators on the other 8."""
+    import cloudpickle
+
+    suffix = "_trn_c1" if one_copy else ""
+    config = getattr(alphabet_sort, f"{name}_16n_ppn{tiles}{suffix}_10steps")()
+    p = config.trainer.parallelism
+    assert (p.data_parallel_replicate_degree, p.data_parallel_shard_degree) == (
+        (1, 8 * tiles) if one_copy else (8, tiles)
+    )
+    assert p.tensor_parallel_degree == 1
+    g = config.generator.parallelism
+    engine = g.tensor_parallel_degree * g.data_parallel_degree
+    assert config.num_generators == 8 * (tiles // engine)
+    host_meshes = plan_host_meshes(
+        _FakeHosts(list(range(16))),
+        trainer_world_size=8 * tiles,
+        per_generator_world_size=engine,
+        num_generators=config.num_generators,
+        gpus_per_node=tiles,
+    )
+    assert host_meshes.trainer.hosts == list(range(8))
+    cloudpickle.dumps(config.trainer)

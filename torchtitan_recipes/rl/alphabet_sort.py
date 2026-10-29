@@ -1199,3 +1199,79 @@ def _with_flex_attention(recipe: str) -> Controller.Config:
 
 for _recipe, (_flex_name, _, _) in _FLEX_ATTENTION_RECIPES.items():
     globals()[_flex_name] = functools.partial(_with_flex_attention, _recipe)
+
+
+def _stacked_ffn_dim(model: Decoder.Config) -> int | None:
+    """The FFN width of a dense model's stacked ``w13`` weight, None for MoE layers.
+
+    FSDP2 pads uneven shards on dim 0 only, so the shard count must divide this width.
+    """
+    layer = model.layers[0] if isinstance(model.layers, (list, tuple)) else model.layers
+    w13 = getattr(getattr(layer, "feed_forward", None), "w13", None)
+    return None if w13 is None else w13.out_features
+
+
+def _rl_grpo_flex_hosts(
+    recipe: str, num_hosts: int, gpus_per_host: int, *, one_copy: bool
+) -> Controller.Config:
+    """``recipe``'s flex variant laid out on ``num_hosts`` x ``gpus_per_host``.
+
+    Half the hosts train with FSDP only (TP 1, EP 1): one copy per host
+    (``num_hosts / 2`` x ``gpus_per_host``) or, with ``one_copy``, a single copy over every
+    trainer rank. The other half run the recipe's generator engines, as many as fit.
+    Batch, steps and the generator layout stay the recipe's.
+    """
+    config = _with_flex_attention(recipe)
+    _, builder, flavor = _FLEX_ATTENTION_RECIPES[recipe]
+    trainer_hosts = num_hosts // 2
+    trainer_gpus = trainer_hosts * gpus_per_host
+    replicas = 1 if one_copy else trainer_hosts
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=replicas,
+        data_parallel_shard_degree=trainer_gpus // replicas,
+        tensor_parallel_degree=1,
+    )
+    ffn = _stacked_ffn_dim(config.trainer.model)
+    if ffn is not None and ffn % trainer_parallelism.data_parallel_shard_degree:
+        raise ValueError(
+            f"{recipe}: FFN width {ffn} does not split into "
+            f"{trainer_parallelism.data_parallel_shard_degree} FSDP shards"
+        )
+    generator_parallelism = config.generator.parallelism
+    trainer_model, generator_model = build_rl_model_configs(
+        builder,
+        flavor,
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="flex",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    engine_gpus = (
+        generator_parallelism.tensor_parallel_degree
+        * generator_parallelism.data_parallel_degree
+    )
+    config.trainer = dataclasses.replace(
+        config.trainer, parallelism=trainer_parallelism, model=trainer_model
+    )
+    config.generator = dataclasses.replace(config.generator, model=generator_model)
+    config.num_generators = (num_hosts - trainer_hosts) * (gpus_per_host // engine_gpus)
+    return config
+
+
+# ..._flex_16n_ppn<P>_10steps (one copy per trainer host) and ..._trn_c1_10steps (one copy over all
+# trainer ranks): the larger models on 16 hosts. P = 12 unless the dense FFN width (17408 for
+# Qwen3-14B / 3.6-27B = 2^10 x 17) only splits into powers of two, then 8 (8 x 8 and 1 x 64).
+_FLEX_16_HOST_TILES = {
+    "rl_grpo_qwen3_1_7b": 12,
+    "rl_grpo_qwen3_5_9b_varlen": 12,
+    "rl_grpo_gpt_oss_20b_varlen": 12,
+    "rl_grpo_qwen3_30b_a3b_varlen": 12,
+    "rl_grpo_qwen3_14b": 8,
+    "rl_grpo_qwen3_6_27b_varlen_perf": 8,
+}
+for _recipe, _tiles in _FLEX_16_HOST_TILES.items():
+    _flex_name = _FLEX_ATTENTION_RECIPES[_recipe][0]
+    for _one_copy, _suffix in ((False, ""), (True, "_trn_c1")):
+        globals()[f"{_flex_name}_16n_ppn{_tiles}{_suffix}_10steps"] = functools.partial(
+            _rl_grpo_flex_hosts, _recipe, 16, _tiles, one_copy=_one_copy
+        )
