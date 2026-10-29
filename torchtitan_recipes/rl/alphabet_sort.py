@@ -1431,6 +1431,22 @@ rl_grpo_gpt_oss_20b_flex_16n_ppn8_gen_c8_maxtok1800_10steps = functools.partial(
     _with_max_tokens, "rl_grpo_gpt_oss_20b_flex_16n_ppn8_gen_c8_10steps", 1800
 )
 
+
+def _with_generator_memory_limit(name: str, limit: float) -> Controller.Config:
+    """``name``'s config with the generator engines held to ``limit`` of each tile's memory."""
+    config = globals()[name]()
+    config.generator.gpu_memory_limit = limit
+    return config
+
+
+# ..._mem07: Qwen3-30B-A3B layout A with 0.7 of each tile for vLLM (diagnostic): at 0.9 every engine failed its first
+# forward with UR_RESULT_ERROR_OUT_OF_RESOURCES.
+rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_gen_c8_mem07_10steps = functools.partial(
+    _with_generator_memory_limit,
+    "rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_gen_c8_10steps",
+    0.7,
+)
+
 # ..._flex_<N>n_ppn<P>_gen_c8_10steps: one trainer copy per host on 8 hosts and as many generator copies (8 of the
 # recipe's engines) on the fewest hosts they fit, so both sides hold the same number of copies.
 _ENGINE_TILES = {
