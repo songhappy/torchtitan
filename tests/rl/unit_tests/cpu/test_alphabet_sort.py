@@ -742,6 +742,7 @@ def test_layout_a_one_trainer_copy_per_host_and_engines_on_all_8_generator_hosts
         g.expert_parallel_degree,
     ) == engine
     assert config.num_generators == copies
+    assert config.trainer.checkpointer.load_only
     plan = plan_host_meshes(
         _FakeHosts(list(range(16))),
         trainer_world_size=8 * tiles,

@@ -1350,6 +1350,10 @@ def _rl_grpo_flex_hosts(
     if num_generators is None:
         num_generators = (num_hosts - trainer_hosts) * (gpus_per_host // engine_gpus)
     config.num_generators = num_generators
+    # Load the HF weights but save nothing, like the 0.6B layouts: on 8 x 8 trainer ranks the last-step DCP save
+    # never finishes (only rank 0's shard lands) and the engines hit gloo's 30-min timeout.
+    assert config.trainer.checkpointer is not None
+    config.trainer.checkpointer.load_only = True
     return config
 
 
