@@ -501,6 +501,7 @@ def test_upstream_layout_and_seeded_long_runs() -> None:
         ("9n_ppn12_trn_n8", 9, (1, 96), 12, 1, list(range(8)), [8]),
         ("2n_ppn12_gen_t8", 2, (1, 12), 1, 8, [0], [1]),
         ("3n_ppn12_gen_n2", 3, (1, 12), 1, 16, [0], [1, 2]),
+        ("9n_ppn12_gen_n2x4", 9, (1, 12), 4, 16, [0], list(range(1, 9))),
     ],
 )
 def test_one_side_is_one_copy_and_the_other_is_at_its_default(

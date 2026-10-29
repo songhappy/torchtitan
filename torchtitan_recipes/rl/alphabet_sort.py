@@ -1173,6 +1173,10 @@ for _a in (1, 2, 4, 8):
 _ONE_SIDE["3n_ppn12_gen_n2"] = dict(
     trainer_gpus=12, generator_tp=16, generator_dp=1, num_generators=1
 )
+# ..._9n_ppn12_gen_n2x4: four of those TP-16 engines on 8 hosts, so several cross-host TP groups run at once.
+_ONE_SIDE["9n_ppn12_gen_n2x4"] = dict(
+    trainer_gpus=12, generator_tp=16, generator_dp=1, num_generators=4
+)
 for _arm in ("full", "lora"):
     for _layout, _sizes in _ONE_SIDE.items():
         for _steps in (2, 10):

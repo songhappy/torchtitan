@@ -19,10 +19,10 @@
 # GEN_TP=<T> spreads each vLLM generator over T tiles (the _gen_tp<T> variant).
 # Test one side as one copy, the other at its default on one full node: TRN_TILES=<A> (one trainer copy on A
 # tiles, _trn_t<A>), TRN_NODES=<G> (one trainer copy over G nodes, select=G+1, _trn_n<G>), GEN_TILES=<A> (one
-# TP-A engine, _gen_t<A>), GEN_NODES=2 (one TP-16 engine over 2 nodes, select=3, _gen_n2). BATCH_SCALED=1
+# TP-A engine, _gen_t<A>), GEN_NODES=2 (one TP-16 engine over 2 nodes, select=3, _gen_n2; GEN_ENGINES=4 for four of them, select=9). BATCH_SCALED=1
 # sizes the batch to the trainer.
 # UPSTREAM=1 (1 node) runs the base recipe's layout: trainer TP 2, one generator TP 2 (_upstream).
-# Overridable: ARM PPN NUM_STEPS TRN_COPIES GEN_TP TRN_TILES GEN_TILES BATCH_SCALED UPSTREAM GEN_NODES TRN_NODES CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
+# Overridable: ARM PPN NUM_STEPS TRN_COPIES GEN_TP TRN_TILES GEN_TILES BATCH_SCALED UPSTREAM GEN_NODES GEN_ENGINES TRN_NODES CONFIG DUMP_FOLDER LOG MPIEXEC EXTRA_ARGS.
 
 # The checkout qsub ran from (cd there first), so a second clone runs its own code.
 TORCHTITAN_DIR=${TORCHTITAN_DIR:-${PBS_O_WORKDIR:-$HOME/git/torchtitan}}
@@ -37,7 +37,7 @@ MPIEXEC=${MPIEXEC:-/opt/cray/pals/1.8/bin/mpiexec}  # PALS, not Intel MPI's Hydr
 EXTRA_ARGS=${EXTRA_ARGS:-}  # qsub passes no script args; extra flags go through here
 mapfile -t NODES < <(sed 's/\..*//' "${PBS_NODEFILE:?run inside a PBS job}" | awk '!seen[$0]++')
 NUM_NODES=${#NODES[@]}
-CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}${TRN_COPIES:+_trn_c$TRN_COPIES}${GEN_TP:+_gen_tp$GEN_TP}${TRN_TILES:+_trn_t$TRN_TILES}${TRN_NODES:+_trn_n$TRN_NODES}${GEN_TILES:+_gen_t$GEN_TILES}${GEN_NODES:+_gen_n$GEN_NODES}${BATCH_SCALED:+_batch_scaled}${UPSTREAM:+_upstream}_${NUM_STEPS}steps}
+CONFIG=${CONFIG:-rl_grpo_qwen3_0_6b_${ARM}_${NUM_NODES}n_ppn${PPN}${TRN_COPIES:+_trn_c$TRN_COPIES}${GEN_TP:+_gen_tp$GEN_TP}${TRN_TILES:+_trn_t$TRN_TILES}${TRN_NODES:+_trn_n$TRN_NODES}${GEN_TILES:+_gen_t$GEN_TILES}${GEN_NODES:+_gen_n$GEN_NODES}${GEN_ENGINES:+x$GEN_ENGINES}${BATCH_SCALED:+_batch_scaled}${UPSTREAM:+_upstream}_${NUM_STEPS}steps}
 DUMP_FOLDER=${DUMP_FOLDER:-outputs/${CONFIG}}
 LOG=${LOG:-$DUMP_FOLDER/train.log}
 
