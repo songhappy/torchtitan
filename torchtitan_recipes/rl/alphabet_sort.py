@@ -1417,6 +1417,40 @@ for _recipe, (_tiles, _engine, _copies) in _ONE_ENGINE_PER_HOST.items():
     )
 
 
+# ..._flex_16n_ppn<P>_trn_c1_gen_c8_10steps: the MoE models with ONE trainer copy over all 8 trainer hosts and the
+# generator engines of layout A, one per generator host. One copy per host (8 tiles) runs out of device memory at
+# step 2, when Adam's state appears (~39 GiB gpt-oss, ~57 GiB 30B-A3B of 64 before activations), and HSDP over
+# some hosts hangs. FSDP shards must divide the expert count: gpt-oss 32 -> 4 tiles per host (1 x 32, TP-4 x EP-4
+# engines); 30B-A3B 128 -> 1 x 64. (tiles per host, generator (TP, DP, EP), generator memory limit)
+_MOE_ONE_TRAINER_COPY = {
+    "rl_grpo_gpt_oss_20b_varlen": (4, (4, 1, 4), None),
+    # At the default 0.9 every 30B-A3B engine failed its first forward (UR_RESULT_ERROR_OUT_OF_RESOURCES).
+    "rl_grpo_qwen3_30b_a3b_varlen": (8, (4, 2, 8), 0.7),
+}
+
+
+def _rl_grpo_moe_one_trainer_copy(recipe: str) -> Controller.Config:
+    tiles, engine, memory_limit = _MOE_ONE_TRAINER_COPY[recipe]
+    config = _rl_grpo_flex_hosts(
+        recipe,
+        16,
+        tiles,
+        one_copy=True,
+        trainer_hosts=8,
+        num_generators=8,
+        generator_layout=engine,
+    )
+    if memory_limit is not None:
+        config.generator.gpu_memory_limit = memory_limit
+    return config
+
+
+for _recipe, (_tiles, _engine, _limit) in _MOE_ONE_TRAINER_COPY.items():
+    globals()[
+        f"{_FLEX_ATTENTION_RECIPES[_recipe][0]}_16n_ppn{_tiles}_trn_c1_gen_c8_10steps"
+    ] = functools.partial(_rl_grpo_moe_one_trainer_copy, _recipe)
+
+
 def _with_max_tokens(name: str, max_tokens: int) -> Controller.Config:
     """``name``'s config with a larger generation budget (gpt-oss reasons in its analysis channel first)."""
     config = globals()[name]()

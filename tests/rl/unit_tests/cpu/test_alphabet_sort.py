@@ -754,3 +754,38 @@ def test_layout_a_one_trainer_copy_per_host_and_engines_on_all_8_generator_hosts
     assert sorted({h for m in plan.generators for h in m.hosts}) == list(range(8, 16))
     cloudpickle.dumps(config.trainer)
     cloudpickle.dumps(config.generator)
+
+
+@pytest.mark.parametrize(
+    ("name", "tiles", "engine"),
+    [
+        ("rl_grpo_gpt_oss_20b_flex", 4, (4, 1, 4)),
+        ("rl_grpo_qwen3_30b_a3b_flex", 8, (4, 2, 8)),
+    ],
+)
+def test_moe_one_trainer_copy_over_8_hosts_and_one_engine_per_generator_host(
+    name, tiles, engine
+):
+    """The MoE models: one trainer copy over hosts 0-7, one generator engine on each of hosts 8-15."""
+    config = getattr(alphabet_sort, f"{name}_16n_ppn{tiles}_trn_c1_gen_c8_10steps")()
+    p, g = config.trainer.parallelism, config.generator.parallelism
+    assert (p.data_parallel_replicate_degree, p.data_parallel_shard_degree) == (
+        1,
+        8 * tiles,
+    )
+    assert (
+        g.tensor_parallel_degree,
+        g.data_parallel_degree,
+        g.expert_parallel_degree,
+    ) == engine
+    assert config.num_generators == 8
+    assert config.trainer.checkpointer.load_only
+    plan = plan_host_meshes(
+        _FakeHosts(list(range(16))),
+        trainer_world_size=8 * tiles,
+        per_generator_world_size=engine[0] * engine[1],
+        num_generators=8,
+        gpus_per_node=tiles,
+    )
+    assert plan.trainer.hosts == list(range(8))
+    assert [m.hosts for m in plan.generators] == [[h] for h in range(8, 16)]
