@@ -53,7 +53,7 @@ def test_trainer_takes_the_first_hosts_and_generators_share_their_node():
     assert plan.generators[0] is not plan.generators[4]
 
 
-def test_plan_rejects_too_few_hosts_and_oversized_generators():
+def test_plan_rejects_too_few_hosts():
     with pytest.raises(ValueError, match="the job has 2"):
         plan_host_meshes(
             FakeMesh(["a", "b"]),
@@ -62,7 +62,9 @@ def test_plan_rejects_too_few_hosts_and_oversized_generators():
             num_generators=4,
             gpus_per_node=4,
         )
-    with pytest.raises(ValueError, match="a node has 4"):
+    with pytest.raises(
+        ValueError, match="1 trainer \\+ 2 generator nodes needed, the job has 2"
+    ):
         plan_host_meshes(
             FakeMesh(["a", "b"]),
             trainer_world_size=4,
@@ -70,6 +72,18 @@ def test_plan_rejects_too_few_hosts_and_oversized_generators():
             num_generators=1,
             gpus_per_node=4,
         )
+
+
+def test_a_generator_larger_than_a_node_spans_its_own_hosts():
+    plan = plan_host_meshes(
+        FakeMesh(["a", "b", "c", "d", "e"]),
+        trainer_world_size=4,
+        per_generator_world_size=8,
+        num_generators=2,
+        gpus_per_node=4,
+    )
+    assert plan.trainer.hosts == ["a"]
+    assert [m.hosts for m in plan.generators] == [["b", "c"], ["d", "e"]]
 
 
 def test_launcher_requires_the_job_env(monkeypatch):

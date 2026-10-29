@@ -1017,14 +1017,22 @@ def _rl_grpo_qwen3_0_6b_hosts(
             config.generator.parallelism, tensor_parallel_degree=generator_tp
         )
         config.num_generators = generators // generator_tp
-    if steps >= 200:
-        config.trainer.debug.seed = config.generator.debug.seed = 42
     if scale_batch:
         loop = config.async_loop
         loop.num_prompts_per_train_step = max(
             loop.num_prompts_per_train_step,
             16 * rep * shard // loop.num_samples_per_prompt,
         )
+    return _finish_qwen3_0_6b(config, arm, steps)
+
+
+def _finish_qwen3_0_6b(
+    config: Controller.Config, arm: str, steps: int
+) -> Controller.Config:
+    """The run settings every 0.6B layout shares: steps, no validation, load-only
+    checkpoint, seed 42 for 200+ steps, and the LoRA arm's adapters."""
+    if steps >= 200:
+        config.trainer.debug.seed = config.generator.debug.seed = 42
     config.async_loop.num_training_steps = steps
     config.async_loop.validation.steps = 0
     assert config.trainer.checkpointer is not None
@@ -1035,6 +1043,50 @@ def _rl_grpo_qwen3_0_6b_hosts(
         config.trainer = apply_transforms(config.trainer, [lora])
         config.generator = apply_transforms(config.generator, [lora])
     return config
+
+
+def _rl_grpo_qwen3_0_6b_one_side(
+    arm: str,
+    steps: int,
+    *,
+    trainer_gpus: int,
+    generator_tp: int,
+    generator_dp: int,
+    num_generators: int,
+) -> Controller.Config:
+    """One model copy on the side under test, the other side at its default.
+
+    The trainer is one FSDP copy over ``trainer_gpus`` (TP 1); the generators are
+    ``num_generators`` engines of TP ``generator_tp`` x FSDP ``generator_dp``. Both
+    models are rebuilt for these meshes. Hosts follow from the sizes: the trainer takes
+    the first ``ceil(trainer_gpus / 12)`` hosts, each engine the next ones it needs.
+    """
+    config = rl_grpo_qwen3_0_6b_flex()
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=trainer_gpus,
+        tensor_parallel_degree=1,
+    )
+    generator_parallelism = dataclasses.replace(
+        config.generator.parallelism,
+        tensor_parallel_degree=generator_tp,
+        data_parallel_degree=generator_dp,
+    )
+    trainer_model, generator_model = _qwen3_rl_model_configs(
+        "0.6B",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="flex",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
+    config.trainer = dataclasses.replace(
+        config.trainer, parallelism=trainer_parallelism, model=trainer_model
+    )
+    config.generator = dataclasses.replace(
+        config.generator, parallelism=generator_parallelism, model=generator_model
+    )
+    config.num_generators = num_generators
+    return _finish_qwen3_0_6b(config, arm, steps)
 
 
 # rl_grpo_qwen3_0_6b_{full,lora}_<hosts>n_ppn<gpus>_<steps>steps, e.g.
@@ -1082,9 +1134,8 @@ for _arm in ("full", "lora"):
                         )
 
 
-# Test one side with the other at its default on one full host: ..._2n_ppn12_trn_t<A> (A trainer GPUs,
-# 12 generators) and ..._2n_ppn12_gen_t<E> (a 12-GPU trainer, E generators). ..._batch_scaled_10steps:
-# the default layout with the batch sized to the trainer, for scaling both sides together.
+# ..._batch_scaled_<steps>steps: the default layout with the batch sized to the trainer, for scaling both
+# sides together.
 for _arm in ("full", "lora"):
     for _gpus in (4, 12):
         for _hosts in (1, 2, 4, 8, 16):
@@ -1099,35 +1150,35 @@ for _arm in ("full", "lora"):
                     _steps,
                     scale_batch=True,
                 )
-    for _side in ("trn", "gen"):
-        for _size in (1, 2, 4, 8, 12):
-            for _steps in (2, 10):
-                globals()[
-                    f"rl_grpo_qwen3_0_6b_{_arm}_2n_ppn12_{_side}_t{_size}_{_steps}steps"
-                ] = functools.partial(
-                    _rl_grpo_qwen3_0_6b_hosts,
-                    _arm,
-                    2,
-                    12,
-                    _steps,
-                    split=(_size, 12) if _side == "trn" else (12, _size),
-                )
 
-# ..._<1+G>n_ppn12_gen_n<G>: a 12-GPU trainer on one host and 12 generators on each of G more hosts
-# (the generators scale out with the trainer held), e.g. rl_grpo_qwen3_0_6b_full_9n_ppn12_gen_n8_2steps.
+# One side scales with the other at its default on one full host, and the side under test is one copy.
+# Trainer (12 TP-1 generator engines on the last host): ..._2n_ppn12_trn_t<A>, one copy on A tiles of one
+# host; ..._<G+1>n_ppn12_trn_n<G>, one copy over G full hosts. Generator (a 1 x 12 trainer on the first
+# host): ..._2n_ppn12_gen_t<A>, one engine of TP A; ..._3n_ppn12_gen_n2, one TP-16 engine over 2 hosts (8
+# tiles each). A dense engine grows only through TP (generator data_parallel_degree > 1 is for expert
+# parallelism) and Qwen3-0.6B's 16 heads cap TP at 16, so 2 hosts is as far as one dense engine spans.
+_ONE_SIDE = {}
+for _a in (1, 2, 4, 8, 12):
+    _ONE_SIDE[f"2n_ppn12_trn_t{_a}"] = dict(
+        trainer_gpus=_a, generator_tp=1, generator_dp=1, num_generators=12
+    )
+for _g in (2, 4, 8):
+    _ONE_SIDE[f"{_g + 1}n_ppn12_trn_n{_g}"] = dict(
+        trainer_gpus=12 * _g, generator_tp=1, generator_dp=1, num_generators=12
+    )
+for _a in (1, 2, 4, 8):
+    _ONE_SIDE[f"2n_ppn12_gen_t{_a}"] = dict(
+        trainer_gpus=12, generator_tp=_a, generator_dp=1, num_generators=1
+    )
+_ONE_SIDE["3n_ppn12_gen_n2"] = dict(
+    trainer_gpus=12, generator_tp=16, generator_dp=1, num_generators=1
+)
 for _arm in ("full", "lora"):
-    for _gen_hosts in (1, 2, 4, 8):
+    for _layout, _sizes in _ONE_SIDE.items():
         for _steps in (2, 10):
             globals()[
-                f"rl_grpo_qwen3_0_6b_{_arm}_{1 + _gen_hosts}n_ppn12_gen_n{_gen_hosts}_{_steps}steps"
-            ] = functools.partial(
-                _rl_grpo_qwen3_0_6b_hosts,
-                _arm,
-                1 + _gen_hosts,
-                12,
-                _steps,
-                split=(12, 12 * _gen_hosts),
-            )
+                f"rl_grpo_qwen3_0_6b_{_arm}_{_layout}_{_steps}steps"
+            ] = functools.partial(_rl_grpo_qwen3_0_6b_one_side, _arm, _steps, **_sizes)
 
 # ..._1n_ppn4_upstream_<steps>steps: the base recipe's layout (trainer TP 2, one generator TP 2) with our run settings.
 for _arm in ("full", "lora"):

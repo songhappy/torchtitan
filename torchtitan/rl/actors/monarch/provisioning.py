@@ -145,7 +145,9 @@ def plan_host_meshes(
 
     One host is shared by every role. Otherwise the trainer takes the first
     ``ceil(trainer_world_size / gpus_per_node)`` hosts and the generators the next
-    ones; generators on one node share its mesh, so they get disjoint GPUs.
+    ones; generators on one node share its mesh, so they get disjoint GPUs. A
+    generator larger than a node gets ``ceil(per_generator_world_size / gpus_per_node)``
+    hosts of its own, its ranks split evenly over them.
     """
     if len(hosts) == 1:
         return HostMeshes(
@@ -153,12 +155,26 @@ def plan_host_meshes(
             generators=[hosts] * num_generators,
             gpus_per_node=gpus_per_node,
         )
+    trainer_nodes = math.ceil(trainer_world_size / gpus_per_node)
     if per_generator_world_size > gpus_per_node:
-        raise ValueError(
-            f"a generator needs {per_generator_world_size} GPUs; a node has {gpus_per_node}"
+        nodes_per_generator = math.ceil(per_generator_world_size / gpus_per_node)
+        generator_nodes = nodes_per_generator * num_generators
+        if trainer_nodes + generator_nodes > len(hosts):
+            raise ValueError(
+                f"{trainer_nodes} trainer + {generator_nodes} generator nodes needed, "
+                f"the job has {len(hosts)}"
+            )
+        return HostMeshes(
+            trainer=hosts.slice(hosts=slice(0, trainer_nodes)),
+            generators=[
+                hosts.slice(hosts=slice(start, start + nodes_per_generator))
+                for start in range(
+                    trainer_nodes, trainer_nodes + generator_nodes, nodes_per_generator
+                )
+            ],
+            gpus_per_node=gpus_per_node,
         )
     generators_per_node = gpus_per_node // per_generator_world_size
-    trainer_nodes = math.ceil(trainer_world_size / gpus_per_node)
     generator_nodes = math.ceil(num_generators / generators_per_node)
     if trainer_nodes + generator_nodes > len(hosts):
         raise ValueError(

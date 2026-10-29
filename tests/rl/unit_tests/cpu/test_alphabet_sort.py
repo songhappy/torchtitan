@@ -485,28 +485,54 @@ def test_upstream_layout_and_seeded_long_runs() -> None:
     assert recipes.rl_grpo_qwen3_0_6b_full_2n_ppn12_2steps().trainer.debug.seed is None
 
 
-@pytest.mark.parametrize("gen_hosts", [1, 2, 4, 8])
-def test_generators_scale_out_with_the_trainer_on_one_host(gen_hosts):
-    """_gen_n<G>: a 1 x 12 trainer on one host, 12 generators on each of G more hosts."""
-    config = getattr(
-        alphabet_sort,
-        f"rl_grpo_qwen3_0_6b_full_{1 + gen_hosts}n_ppn12_gen_n{gen_hosts}_2steps",
-    )()
+@pytest.mark.parametrize(
+    (
+        "layout",
+        "hosts",
+        "trainer",
+        "engines",
+        "engine_tp",
+        "trainer_hosts",
+        "generator_hosts",
+    ),
+    [
+        ("2n_ppn12_trn_t4", 2, (1, 4), 12, 1, [0], [1]),
+        ("5n_ppn12_trn_n4", 5, (1, 48), 12, 1, [0, 1, 2, 3], [4]),
+        ("9n_ppn12_trn_n8", 9, (1, 96), 12, 1, list(range(8)), [8]),
+        ("2n_ppn12_gen_t8", 2, (1, 12), 1, 8, [0], [1]),
+        ("3n_ppn12_gen_n2", 3, (1, 12), 1, 16, [0], [1, 2]),
+    ],
+)
+def test_one_side_is_one_copy_and_the_other_is_at_its_default(
+    layout, hosts, trainer, engines, engine_tp, trainer_hosts, generator_hosts
+):
+    """trn_t / trn_n: one trainer copy, 12 TP-1 engines on one host; gen_t / gen_n: one
+    generator engine, the trainer 1 x 12 on one host."""
+    import cloudpickle
+
+    config = getattr(alphabet_sort, f"rl_grpo_qwen3_0_6b_full_{layout}_2steps")()
     p = config.trainer.parallelism
-    assert (p.data_parallel_replicate_degree, p.data_parallel_shard_degree) == (1, 12)
-    assert config.num_generators == 12 * gen_hosts
-    assert config.async_loop.num_prompts_per_train_step == 8  # the batch stays fixed
-    host_meshes = plan_host_meshes(
-        _FakeHosts(list(range(1 + gen_hosts))),
-        trainer_world_size=12,
-        per_generator_world_size=1,
-        num_generators=config.num_generators,
+    assert (p.data_parallel_replicate_degree, p.data_parallel_shard_degree) == trainer
+    g = config.generator.parallelism
+    assert (
+        config.num_generators,
+        g.tensor_parallel_degree,
+        g.data_parallel_degree,
+    ) == (
+        engines,
+        engine_tp,
+        1,
+    )
+    plan = plan_host_meshes(
+        _FakeHosts(list(range(hosts))),
+        trainer_world_size=trainer[0] * trainer[1],
+        per_generator_world_size=engine_tp,
+        num_generators=engines,
         gpus_per_node=12,
     )
-    assert host_meshes.trainer.hosts == [0]
-    assert sorted({m.hosts[0] for m in host_meshes.generators}) == list(
-        range(1, 1 + gen_hosts)
-    )
+    assert plan.trainer.hosts == trainer_hosts
+    assert sorted({h for m in plan.generators for h in m.hosts}) == generator_hosts
+    cloudpickle.dumps(config.trainer)
 
 
 class _FakeHosts:
