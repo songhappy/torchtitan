@@ -218,6 +218,7 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         # upstream. current_flash_attention_impl() returns None when FA2
         # is the implicit default (SM < 9.0). For FA3, only force
         # num_splits=1 in batch-invariant mode (determinism).
+
         fa_impl = current_flash_attention_impl()
         if fa_impl in (None, "FA2") or is_in_batch_invariant_mode():
             extra_kwargs["num_splits"] = 1
@@ -227,6 +228,28 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
 
         if self.out_transform is not None:
             extra_kwargs["return_aux"] = AuxRequest(lse=True)
+
+        """
+        # Ensure key_cache and value_cache are 4D: [num_blocks, block_size, num_kv_heads, head_dim]
+        if block_table is not None and key_cache.ndim == 3:
+            num_blocks, block_size, kv_dim = key_cache.shape
+            head_dim = query.shape[-1]  # 128
+            num_kv_heads = kv_dim // head_dim  # 256 // 128 = 2
+            
+            key_cache = key_cache.view(num_blocks, block_size, num_kv_heads, head_dim)
+            value_cache = value_cache.view(num_blocks, block_size, num_kv_heads, head_dim)
+ 
+        # Insert right above line 245 (result = torch.nn.attention.varlen.varlen_attn_out...):
+        print(f"[DEBUG DEVICES]")
+        print(f"  output:       {output.device}")
+        print(f"  query:        {query.device}")
+        print(f"  key_cache:    {key_cache.device}")
+        print(f"  value_cache:  {value_cache.device}")
+        print(f"  cu_seqlens_q: {cu_seqlens_q.device if cu_seqlens_q is not None else None}")
+        print(f"  cu_seqlens_k: {cu_seqlens_k.device if cu_seqlens_k is not None else None}")
+        print(f"  block_table:  {block_table.device if block_table is not None else None}")
+        print(f"  seqused_k:    {seqused_k.device if seqused_k is not None else None}")
+
 
         result = torch.nn.attention.varlen.varlen_attn_out(
             output[:num_actual_tokens],
@@ -250,6 +273,173 @@ class PyTorchVarlenAttentionImpl(FlashAttentionImpl):
         out = self.out_transform(out, lse.transpose(0, 1))
         output[:num_actual_tokens].copy_(out)
         return output[:num_actual_tokens]
+        
+                # Check if running on Intel XPU
+        if query.device.type == "xpu":
+            # 1. Prepare queries: [total_tokens, H_q, D] ->
+            q = query[:num_actual_tokens].transpose(0, 1).unsqueeze(0)
+
+            # 2. Extract active prompt / decoded tokens from key_cache and value_cache
+            # key_cache shape: [num_blocks, block_size, H_kv, D]
+            #if key_cache.ndim == 4:
+            #    k = key_cache.view(-1, key_cache.shape, key_cache.shape).transpose(0, 1).unsqueeze(0)
+            #    v = value_cache.view(-1, value_cache.shape, value_cache.shape).transpose(0, 1).unsqueeze(0)
+            if key_cache.ndim == 4:
+                # key_cache.shape is [num_blocks, block_size, num_kv_heads, head_dim]
+                # Flatten the first two dimensions (blocks & block_size) into a single sequence token dimension
+                num_blocks, block_size, num_kv_heads, head_dim = key_cache.shape
+                k = key_cache.view(-1, num_kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+                v = value_cache.view(-1, num_kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+ 
+            else:
+                k = key_cache.transpose(0, 1).unsqueeze(0)
+                v = value_cache.transpose(0, 1).unsqueeze(0)
+
+            # Slice keys/values to match query token sequence length
+            #seq_len = q.shape
+            #k = k[:, :, :seq_len, :]
+            #v = v[:, :, :seq_len, :]
+            seq_len = q.shape[2]
+            k = k[:, :, :seq_len, :]
+            v = v[:, :, :seq_len, :]
+
+
+
+            # 3. Compute attention via native PyTorch SDPA (fully supported on Intel XPU)
+            #attn_out = torch.nn.functional.scaled_dot_product_attention(
+            #    q, k, v, is_causal=self.is_causal, scale=self.scale
+            attn_out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, is_causal=is_causal, scale=self.scale
+            )
+            # Reshape back to [total_tokens, H_q, D]
+            attn_out = attn_out.squeeze(0).transpose(0, 1).contiguous()
+            output[:num_actual_tokens].copy_(attn_out)
+
+            if self.out_transform is None:
+                return output[:num_actual_tokens]
+
+            # Dummy LSE tensor in case out_transform is configured
+            lse = torch.zeros((q.shape, seq_len), dtype=torch.float32, device=query.device)
+            out = self.out_transform(output[:num_actual_tokens], lse.transpose(0, 1))
+            output[:num_actual_tokens].copy_(out)
+            return output[:num_actual_tokens]
+
+        else:
+            # Original CUDA path
+            result = torch.nn.attention.varlen.varlen_attn_out(
+                output[:num_actual_tokens],
+                query[:num_actual_tokens],
+                key_cache,
+                value_cache,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                scale=self.scale,
+                window_size=sliding_window_size,
+                block_table=block_table,
+                seqused_k=seqused_k,
+                **extra_kwargs,
+            )
+            if self.out_transform is None:
+                return result
+
+            out, lse = result
+            out = self.out_transform(out, lse.transpose(0, 1))
+            output[:num_actual_tokens].copy_(out)
+            return output[:num_actual_tokens]
+        """
+        # Ensure key_cache and value_cache are 4D: [num_blocks, block_size, num_kv_heads, head_dim]
+        if block_table is not None and key_cache.ndim == 3:
+            num_blocks, block_size, kv_dim = key_cache.shape
+            head_dim = query.shape[-1]  # 128
+            num_kv_heads = kv_dim // head_dim  # 256 // 128 = 2
+
+            key_cache = key_cache.view(num_blocks, block_size, num_kv_heads, head_dim)
+            value_cache = value_cache.view(num_blocks, block_size, num_kv_heads, head_dim)
+
+        # Check if running on Intel XPU
+        if query.device.type == "xpu":
+            # Qwen decoders use causal attention
+            is_causal_xpu = True
+
+            # 1. Prepare queries: [total_tokens, H_q, D] -> [1, H_q, total_tokens, D]
+            q = query[:num_actual_tokens].transpose(0, 1).unsqueeze(0)
+
+            # 2. Extract and format active keys/values from cache
+            if key_cache.ndim == 4:
+                num_blocks, block_size, num_kv_heads, head_dim = key_cache.shape
+                k = key_cache.view(-1, num_kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+                v = value_cache.view(-1, num_kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+            else:
+                k = key_cache.transpose(0, 1).unsqueeze(0)
+                v = value_cache.transpose(0, 1).unsqueeze(0)
+
+            # Slice keys/values sequence dimension to match query token sequence length
+            #seq_len = q.shape[2]
+            #k = k[:, :, :seq_len, :]
+            #v = v[:, :, :seq_len, :]
+
+            # 3. Compute attention via native PyTorch SDPA (highly optimized on Intel XPU)
+            #attn_out = torch.nn.functional.scaled_dot_product_attention(
+            #    q, k, v, is_causal=is_causal_xpu, scale=self.scale
+            #)
+            # Slice keys/values sequence dimension to match query token sequence length
+            seq_len = int(q.shape[2])
+            k = k[:, :, :seq_len, :]
+            v = v[:, :, :seq_len, :]
+
+            # Align KV heads with Query heads for Grouped Query Attention (GQA)
+            num_q_heads = int(q.shape[1])
+            num_kv_heads = int(k.shape[1])
+            if num_q_heads != num_kv_heads:
+                repeat_factor = num_q_heads // num_kv_heads
+                k = k.repeat_interleave(repeat_factor, dim=1)
+                v = v.repeat_interleave(repeat_factor, dim=1)
+
+            # 3. Compute attention via native PyTorch SDPA (highly optimized on Intel XPU)
+            attn_out = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, is_causal=is_causal_xpu, scale=self.scale
+            )
+ 
+            
+            # Reshape back to [total_tokens, H_q, D]
+            attn_out = attn_out.squeeze(0).transpose(0, 1).contiguous()
+            output[:num_actual_tokens].copy_(attn_out)
+
+            if self.out_transform is None:
+                return output[:num_actual_tokens]
+
+            # Dummy LSE tensor in case out_transform is configured
+            lse = torch.zeros((q.shape[1], seq_len), dtype=torch.float32, device=query.device)
+            out = self.out_transform(output[:num_actual_tokens], lse.transpose(0, 1))
+            output[:num_actual_tokens].copy_(out)
+            return output[:num_actual_tokens]
+
+        else:
+            # Original CUDA path
+            result = torch.nn.attention.varlen.varlen_attn_out(
+                output[:num_actual_tokens],
+                query[:num_actual_tokens],
+                key_cache,
+                value_cache,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                scale=self.scale,
+                window_size=sliding_window_size,
+                block_table=block_table,
+                seqused_k=seqused_k,
+                **extra_kwargs,
+            )
+            if self.out_transform is None:
+                return result
+
+            out, lse = result
+            out = self.out_transform(out, lse.transpose(0, 1))
+            output[:num_actual_tokens].copy_(out)
+            return output[:num_actual_tokens]
 
 
 class VLLMAttentionWrapper(Module):
