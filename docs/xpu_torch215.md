@@ -12,7 +12,8 @@ and the layout recipes in `torchtitan_recipes/rl/alphabet_sort.py`.
 
 Contents: [Quick start](#quick-start) - [Environment setup](#environment-setup) - [Running](#running) -
 [A healthy run](#a-healthy-run) - [Experiments and expected results](#experiments-and-expected-results) -
-[XPU settings and why](#xpu-settings-and-why) - [Known issues](#known-issues)
+[XPU settings and why](#xpu-settings-and-why) - [Known issues](#known-issues). What is still missing on XPU, phase by
+phase and repo by repo: [xpu_rl_roadmap.md](xpu_rl_roadmap.md).
 
 ## Quick start
 
