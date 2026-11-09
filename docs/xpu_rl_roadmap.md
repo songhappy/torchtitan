@@ -8,7 +8,8 @@ date). Start point: upstream torchtitan RL ran on CUDA only, and nothing in the 
 
 Contents: [Phases](#phases) - [Phase 0](#phase-0----each-component-on-xpu) -
 [Phase 1](#phase-1----qwen3-06b-grpo-end-to-end) - [Phase 2](#phase-2----bigger-models-more-parallelism) -
-[Phase 3](#phase-3----rdma-on-two-intel-platforms-cxi-aurora-and-bmg) - [Known issues](#known-issues-not-gaps) -
+[Phase 3](#phase-3----rdma-on-two-intel-platforms-cxi-aurora-and-bmg) - [Platform support](#platform-support) -
+[Known issues](#known-issues-not-gaps) -
 [Notes](#notes)
 
 ## Phases
@@ -241,6 +242,33 @@ one tile per card, so no `FLAT` / implicit-scaling settings.
 | 3B-TS1 | TorchStore | Same transports as 3A through 3.0 (3-TS1, 3-TS2, 3-TS3); with ibverbs also MonarchRDMA (3-TS6) after 3B-M1 | -- | R3-style A/B on BMG | todo | -- (covered by 3.0) |
 | 3B-T1 | torchtitan | GRPO on BMG: a launcher for the BMG cluster (not PBS / PALS), rollouts over `_transport` (3-T1) | not started | R1 / R3 on BMG | todo | launcher for that scheduler, if upstream lacks it |
 
+
+## Platform support
+
+Which Intel GPUs the stack targets and how far each is. Phases 0-2 ran on Aurora only; every other platform starts
+with its own pass through phases 0-1.
+
+| Platform | GPU | Where | Network | Status |
+|---|---|---|---|---|
+| Aurora | Data Center GPU Max 1550 (PVC, Xe-HPC; 2 tiles per card, 12 `FLAT` tiles per node) | ALCF Aurora | HPE Slingshot, libfabric `cxi` | phases 0-2 done; 3A in progress |
+| BMG | Arc Battlemage (B-series, Xe2; 1 tile per card) | to confirm | not decided (see 3B) | not started ([3B](#3b-bmg-intel-arc-battlemage)) |
+| Crescent Island | Data Center GPU "Crescent Island" (Xe3P; inference-focused, LPDDR5X memory per Intel's announcement) | to confirm | to confirm | not started (below) |
+
+### Crescent Island
+
+Specs to confirm: tiles per card, memory per card, cards per node, node interconnect, scale-out NIC, cluster and
+scheduler. Already in the code: vllm-xpu-kernels builds Xe3P / CRI targets when `VLLM_XPU_ENABLE_XE3P` is on (Aurora
+builds turn it off).
+
+| # | Repo | Item | XPU now | Test | Status | Upstream |
+|---|---|---|---|---|---|---|
+| CRI-S1 | stack | torch XPU and oneAPI / driver support for Xe3P; `vllm-xpu-kernels` built with its CRI targets; oneCCL / XCCL on CRI | not run | TC L0-L4 on CRI | todo | -- |
+| CRI-S2 | stack | Device layout: tiles per card and how they show up (`ZE_FLAT_DEVICE_HIERARCHY`), memory per tile; adjust the launcher's tile counts and thread caps | specs to confirm | TC L2-L3 | todo | -- |
+| CRI-S3 | stack | Network: scale-out NIC and its RDMA path (then 3.0 applies, as for 3B-S2) | specs to confirm | -- | todo | -- |
+| CRI-M1 | Monarch | Actors on CRI devices (the XPU runtime #4307 should apply as is) | not run | TC L3 | todo | -- |
+| CRI-TS1 | TorchStore | XCCL transport on CRI; RDMA transports once CRI-S3 is known | not run | R3 on CRI | todo | -- |
+| CRI-T1 | torchtitan | GRPO 0.6B smoke and basic on CRI: a launcher for its cluster's scheduler, layouts for its tile count | not started | R1, R2 on CRI | todo | -- |
+| CRI-V1 | vLLM | Generator on CRI first (an inference part): vLLM XPU worker and kernels on Xe3P, generation correctness | not run | `check_compute.pbs` `vllm_generate` on CRI | todo | vLLM / vllm-xpu-kernels |
 
 ## Known issues (not gaps)
 
