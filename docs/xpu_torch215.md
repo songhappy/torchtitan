@@ -31,16 +31,16 @@ model weights where compute nodes can read them, and the dataset cached once (ru
 | Monarch | meta-pytorch/monarch `main` | `a0c586486` | no patches (XPU runtime #4307 and `PBSJob` #5067 merged) |
 | TorchStore | songhappy/torchstore `xpu-all` | `3edc47f` | upstream `e500a6f` + XCCL transport (#171), replicated fetch (#201), routing fix, stream sync |
 | vLLM | vllm-project/vllm `main` | `083060d04` | no patches; newer vLLM dropped the sequence-parallel config torchtitan passes (#60517) |
-| vllm-xpu-kernels | `release/0.1.15.4` | -- | built from source for torch 2.15.0 |
+| vllm&#8209;xpu&#8209;kernels | `release/0.1.15.4` | -- | built from source for torch 2.15.0 |
 
 ### Changes from the previous version of this guide
 
 | Layer | Previous (torch 2.15 nightly) | Now |
 |---|---|---|
-| torch / torchvision | 2.15.0.dev20261005 / 0.30.0.dev20261005 | **2.15.0 / 0.29.2** (release) |
+| torch&nbsp;/&nbsp;torchvision | 2.15.0.dev20261005 / 0.30.0.dev20261005 | **2.15.0 / 0.29.2** (release) |
 | Monarch | fork `xpu-all` `2f1637ca6` | **upstream `main` `a0c586486`** |
 | triton | triton-xpu 3.9.0 (nightly build) | triton-xpu 3.9.0 + vLLM's `triton==3.9.0+xpu` placeholder |
-| vllm-xpu-kernels | 0.1.15.4 from source vs the nightly | same, rebuilt for torch 2.15.0 |
+| vllm&#8209;xpu&#8209;kernels | 0.1.15.4 from source vs the nightly | same, rebuilt for torch 2.15.0 |
 | Build | -- | re-activate the env after step 2 |
 | Unchanged | vLLM `083060d04`, TorchStore `3edc47f`, oneAPI 2026.1, oneCCL 2022.1.2 | |
 
@@ -162,11 +162,11 @@ The CUDA-only packages `attn-gym` brings are unused on XPU.
 | Component | Version | Commit | Install |
 |---|---|---|---|
 | torchtitan | source tree | this branch | -- |
-| Monarch (`torchmonarch`) | 0.8.0.dev0 | `a0c586486` | editable Rust build (step 5) |
+| Monarch&nbsp;(`torchmonarch`) | 0.8.0.dev0 | `a0c586486` | editable Rust build (step 5) |
 | TorchStore | 0.0.0.dev0 | `3edc47f` | editable, `--no-deps` (step 6) |
 | vLLM | 0.30.1rc1.dev523+g083060d04.xpu | `083060d04` | editable (step 4) |
-| vllm-xpu-kernels | 0.1.15.4 | `release/0.1.15.4` | from source (step 3) |
-| torch / torchvision | 2.15.0+xpu / 0.29.2+xpu | -- | wheels (step 2) |
+| vllm&#8209;xpu&#8209;kernels | 0.1.15.4 | `release/0.1.15.4` | from source (step 3) |
+| torch&nbsp;/&nbsp;torchvision | 2.15.0+xpu / 0.29.2+xpu | -- | wheels (step 2) |
 | triton-xpu / oneccl / intel-sycl-rt / oneAPI | 3.9.0 / 2022.1.2 / 2026.1.2 / 2026.1 | -- | with torch; oneAPI module |
 
 Others: python 3.12, transformers 5.22.2, datasets 4.7.0, huggingface_hub 1.33.0, spmd_types 0.3.1, torchdata
@@ -218,16 +218,16 @@ per engine (tiles per engine = the engine's TP).
 | Runs | Submit (`qsub ... scripts/rl/xpu/run_grpo.sh`) | Steps | Trainer mesh | Generator mesh |
 |---|---|---|---|---|
 | 1 node: 2 trainer + 2 generator tiles | `-l select=1 -v ARM=<arm>,NUM_STEPS=2` | 2 | 1 x 2 | 2 x 1 (same node) |
-| 8 nodes x 4 tiles | `-l select=8 -v ARM=<arm>,NUM_STEPS=2` | 2 | 4 x 4 (nodes 1-4) | 16 x 1 (nodes 5-8) |
+| 8&nbsp;nodes&nbsp;x&nbsp;4&nbsp;tiles | `-l select=8 -v ARM=<arm>,NUM_STEPS=2` | 2 | 4 x 4 (nodes 1-4) | 16 x 1 (nodes 5-8) |
 
 ### 2. Basic regression (18 runs, ~2 h plus queue)
 
 | Runs | Submit | Steps | Trainer mesh | Generator mesh |
 |---|---|---|---|---|
 | 2 nodes x P tiles, P = 1, 2, 4, 8, 12 | `-l select=2 -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2 | 1 x P (node 1) | P x 1 (node 2) |
-| 16 nodes x P, P = 4, 12 | `-l select=16 -q capacity -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2 | 8 x P (nodes 1-8) | 8P x 1 (32 / 96; nodes 9-16) |
-| 1 node, 10 steps | `-l select=1 -v ARM=<arm>` | 10 | 1 x 2 | 2 x 1 (same node) |
-| 8 nodes x 4, 10 steps | `-l select=8 -v ARM=<arm>` | 10 | 4 x 4 (nodes 1-4) | 16 x 1 (nodes 5-8) |
+| 16&nbsp;nodes&nbsp;x&nbsp;P,&nbsp;P&nbsp;=&nbsp;4,&nbsp;12 | `-l select=16 -q capacity -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2 | 8 x P (nodes 1-8) | 8P x 1 (32 / 96; nodes 9-16) |
+| 1&nbsp;node,&nbsp;10&nbsp;steps | `-l select=1 -v ARM=<arm>` | 10 | 1 x 2 | 2 x 1 (same node) |
+| 8&nbsp;nodes&nbsp;x&nbsp;4,&nbsp;10&nbsp;steps | `-l select=8 -v ARM=<arm>` | 10 | 4 x 4 (nodes 1-4) | 16 x 1 (nodes 5-8) |
 
 ### 3. Generator scaling (12 runs, ~40 min)
 
@@ -238,7 +238,7 @@ heads, so an engine spans nodes only on 4-tile nodes.
 |---|---|---|---|---|
 | 2 nodes x 12, engine TP A, A = 1, 2, 4, 8 | `-l select=2 -v ARM=<arm>,PPN=12,GEN_TILES=<A>,NUM_STEPS=2` | 2 | 1 x 12 (node 1) | 1 x A (node 2) |
 | 3 nodes x 4, one engine over 2 nodes | `-l select=3 -v ARM=<arm>,PPN=4,GEN_NODES=2,NUM_STEPS=2` | 2 | 1 x 4 (node 1) | 1 x 8 (nodes 2-3) |
-| 9 nodes x 4, four such engines | `-l select=9 -q capacity -v ARM=<arm>,PPN=4,GEN_NODES=2,GEN_ENGINES=4,NUM_STEPS=2` | 2 | 1 x 4 (node 1) | 4 x 8 (nodes 2-9) |
+| 9&nbsp;nodes&nbsp;x&nbsp;4,&nbsp;four&nbsp;such&nbsp;engines | `-l select=9 -q capacity -v ARM=<arm>,PPN=4,GEN_NODES=2,GEN_ENGINES=4,NUM_STEPS=2` | 2 | 1 x 4 (node 1) | 4 x 8 (nodes 2-9) |
 
 ### 4. Larger models (2 runs, 2 and 16 nodes)
 
