@@ -227,22 +227,16 @@ Qwen3-0.6B, alphabet sort; `<arm>` = `full` and `lora` (each row is two runs). M
 | 1 node, 10 steps | `-l select=1 -v ARM=<arm>` | 10/10, mesh 1 x 2 |
 | 8 nodes x 4, 10 steps | `-l select=8 -v ARM=<arm>` | 10/10, mesh 4 x 4 |
 
-### 3. Larger models (6 runs, 16-node time)
+### 3. Larger models (2 runs, 2 and 16 nodes)
 
-Link the model under `assets/hf/` first (`ln -sfn /lus/flare/projects/Aurora_deployment/intel/models/<name> assets/hf/<name>`;
-gpt-oss: `.../gpt-oss-20b-BF16` as `assets/hf/gpt-oss-20b`), then
-`qsub -l select=<N> -l walltime=01:00:00 -q capacity -v CONFIG=<config> scripts/rl/xpu/run_grpo.sh`. Expected: 10/10
-steps; the two marked runs pass if still training at walltime (their steps take minutes). The logprob-parity flag on
-these models is a [known issue](#known-issues).
+Link the model under `assets/hf/` first (`ln -sfn /lus/flare/projects/Aurora_deployment/intel/models/<name> assets/hf/<name>`),
+then `qsub -l select=<N> -l walltime=01:00:00 -q capacity -v CONFIG=<config> scripts/rl/xpu/run_grpo.sh`. Expected:
+10/10 steps.
 
 | Model | Config | Nodes |
 |---|---|---|
-| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex` | 1 |
 | Qwen3-14B | `rl_grpo_qwen3_14b_flex` | 2 |
 | Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 16 |
-| Qwen3-14B (still training at walltime passes) | `rl_grpo_qwen3_14b_flex_16n_ppn8_gen_c8_10steps` | 16 |
-| Qwen3-30B-A3B | `rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_trn_c1_gen_c8_10steps` | 16 |
-| gpt-oss-20b (still training at walltime passes) | `rl_grpo_gpt_oss_20b_flex_16n_ppn4_trn_c1_gen_c8_10steps` | 16 |
 
 ### What to report
 
