@@ -174,7 +174,7 @@ Others: python 3.12, transformers 5.22.2, datasets 4.7.0, huggingface_hub 1.33.0
 
 ### Check the env on compute nodes
 
-Run the smoke (experiment 1) before anything else: it proves vLLM's kernels (real completions, non-zero reward),
+Run the smoke ([Validation](#validation) 1) before anything else: it proves vLLM's kernels (real completions, non-zero reward),
 Monarch across hosts and TorchStore across nodes.
 
 ## Running
@@ -191,7 +191,6 @@ qsub -l select=16 -l walltime=01:00:00 -q capacity -v CONFIG=rl_grpo_qwen3_1_7b_
 | Override | Default | Meaning |
 |---|---|---|
 | `ARM` / `PPN` / `NUM_STEPS` | `full` / `4` / `10` | Qwen3-0.6B arm (`full`, `lora`); tiles per node (1 or even, <= 12); 2, 10 or 200 steps |
-| `TRN_COPIES`, `GEN_TP`, `TRN_TILES`, `TRN_NODES`, `GEN_TILES`, `GEN_NODES`, `GEN_ENGINES`, `BATCH_SCALED` | unset | layout variants used by the experiments below |
 | `CONFIG` | from the above | any config in `alphabet_sort.py` (larger models) |
 | `CONDA_ENV`, `DUMP_FOLDER`, `LOG` | `monarch_t215`, `outputs/<config>`, `train.log` there | env and outputs |
 
@@ -206,96 +205,45 @@ running, 5 total.
 - `grad_norm` (Qwen3-0.6B): LoRA ~0.01-0.8, full ~0.1-5;
 - the `Mesh split` line in `train.log` shows the expected mesh.
 
-## Experiments and expected results
+## Validation
 
-Qwen3-0.6B, alphabet sort, both arms unless noted; mesh = trainer `dp_replicate x dp_shard`. Sections 1-2 and the
-marked rows of 7 ran on this env on 2026-11-09 (after 1- and 2-node compute checks passed); the rest ran
-2026-10-28 .. 11-04 on the previous nightly stack (same vLLM, TorchStore, oneCCL).
+Run these on the env you built, in order, and judge each run by [A healthy run](#a-healthy-run) and the expected
+mesh below (from the `Mesh split` line in `train.log`). Model: Qwen3-0.6B, alphabet sort; `<arm>` = `full` and
+`lora` (each row is two runs). Mesh = trainer `dp_replicate x dp_shard`.
 
-### 1. Smoke (after every stack change)
+### 1. Smoke (4 runs, ~30 min)
 
-| Layout | Submit | Expected |
+| Layout | Submit (`qsub ... scripts/rl/xpu/run_grpo.sh`) | Expected |
 |---|---|---|
 | 1 node: 2 trainer + 2 generator tiles | `-l select=1 -v ARM=<arm>,NUM_STEPS=2` | 2/2 steps, mesh 1 x 2 |
-| 2 nodes x 4 | `-l select=2 -v ARM=<arm>,NUM_STEPS=2` | 2/2, mesh 1 x 4 |
+| 2 nodes x 4 tiles | `-l select=2 -v ARM=<arm>,NUM_STEPS=2` | 2/2, mesh 1 x 4 |
 
-Result: 4/4 (2026-11-09, this env).
-
-### 2. Basic regression (18 runs; the gate for any code change)
-
-Default layout: trainer on the first half of the nodes, one copy per node; single-tile generators on the rest.
+### 2. Basic regression (18 runs, ~2 h plus queue)
 
 | Runs | Submit | Expected |
 |---|---|---|
-| 2 nodes x 1, 2, 4, 8, 12 tiles | `-l select=2 -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2, mesh 1 x P |
-| 16 nodes x 4 and 12 | `-l select=16 -q capacity -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2, mesh 8 x P |
-| 1 and 8 nodes x 4, 10 steps | `-l select=<1,8> -v ARM=<arm>` | 10/10, mesh 1 x 2 / 4 x 4 |
+| 2 nodes x P tiles, P = 1, 2, 4, 8, 12 | `-l select=2 -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2, mesh 1 x P |
+| 16 nodes x P, P = 4, 12 | `-l select=16 -q capacity -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2, mesh 8 x P |
+| 1 node, 10 steps | `-l select=1 -v ARM=<arm>` | 10/10, mesh 1 x 2 |
+| 8 nodes x 4, 10 steps | `-l select=8 -v ARM=<arm>` | 10/10, mesh 4 x 4 |
 
-Result: 18/18 (2026-11-09, this env; peak 2134 of 8192 tasks and 128 GB host memory per node).
+### 3. Larger models (optional, 16-node time)
 
-### 3. Weight transport at scale
+Link the model under `assets/hf/` first (`/lus/flare/projects/Aurora_deployment/intel/models/<name>`), then
+`qsub -l select=<N> -l walltime=01:00:00 -q capacity -v CONFIG=<config> scripts/rl/xpu/run_grpo.sh`. Expected: 10/10
+steps. The logprob-parity flag on these models is a [known issue](#known-issues).
 
-16 nodes x 4 and x 12: one copy per node (8 x 4, 8 x 12) and one over all trainer tiles (`TRN_COPIES=1`, 1 x 96),
-2 steps: 6/6.
-
-### 4. Trainer scaling, one copy (generators: 12 single-tile engines on the last node)
-
-| Submit (`NUM_STEPS=2`) | What | Expected mesh |
+| Model | Config | Nodes |
 |---|---|---|
-| `-l select=2 -v PPN=12,TRN_TILES=<A>`, A = 1, 2, 4, 8, 12 | one copy on A tiles of the first node | 1 x A |
-| `-l select=<G+1> -v PPN=12,TRN_NODES=<G>`, G = 2, 4, 8 | one copy over G full nodes | 1 x 24 / 48 / 96 |
+| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex` | 1 |
+| Qwen3-14B | `rl_grpo_qwen3_14b_flex` | 2 |
+| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 16 |
+| Qwen3-30B-A3B | `rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_trn_c1_gen_c8_10steps` | 16 |
 
-Result: 16/16. `TRN_COPIES=2` over a subset of nodes (2 x 48) hangs -- [known](#known-issues).
+### What to report
 
-### 5. Generator scaling, one engine (trainer fixed)
-
-| Submit (`NUM_STEPS=2`) | What | Expected |
-|---|---|---|
-| `-l select=2 -v PPN=12,GEN_TILES=<A>`, A = 1, 2, 4, 8 | 1 x 12 trainer; one vLLM engine of TP A | trains, real completions |
-| `-l select=3 -v PPN=4,GEN_NODES=2` | 1 x 4 trainer; one TP-8 engine over 2 nodes | same |
-| `-l select=9 -v PPN=4,GEN_NODES=2,GEN_ENGINES=4` | four such engines on 8 nodes | same |
-
-Result: 12/12. TP must divide the KV heads (8), so an engine spans nodes only on 4-tile nodes.
-
-### 6. Both sides at scale
-
-Default layout at 4 and 8 nodes x 12, and `BATCH_SCALED=1` (`NUM_STEPS=10` or `30`) on 2-16 nodes: 12/12.
-
-### 7. Larger models (flex attention; `CONFIG=...`, 10 steps)
-
-Link each model under `assets/hf/` (`/lus/flare/projects/Aurora_deployment/intel/models/<name>`; gpt-oss:
-`gpt-oss-20b-BF16`). `_flex` = upstream's recipe unchanged except flex attention (varlen has no XPU kernel).
-`_16n_...` = our 16-node layouts (FSDP instead of trainer TP / EP, no checkpoint save).
-
-**Upstream layout** (`rl_grpo_<model>_flex`):
-
-| Model | Upstream layout: trainer / generator | Nodes | Result on XPU |
-|---|---|---|---|
-| Qwen3-1.7B (dense) | TP 2 / one engine TP 4 (6 GPUs) | 1 | 10/10 (this env, 2026-11-09) |
-| Qwen3-14B (dense) | TP 8 / one engine TP 8 (16 GPUs) | 2 | 10/10 (this env, 2026-11-09) |
-| Qwen3-30B-A3B (MoE, 128 experts) | FSDP 2 x TP 2 x EP 4 / DP 2 x TP 2 x EP 4 (8 GPUs) | 1 | fail: exits at generator start with oneCCL KVS errors (open) |
-| gpt-oss-20b (MoE, 32 experts) | TP 2 x EP 2 / TP 4 x EP 4; 5 prompts per step | 1 | fail: trainer out of memory (20B on 2 tiles of 64 GB) |
-| Qwen3.5-9B / Qwen3.6-27B (GDN) | -- | -- | blocked: vLLM's GDN path needs NVIDIA-only CuTe kernels |
-
-**16-node layouts** (first 8 nodes train, last 8 generate; `-l select=16 -q capacity`, walltime 1-2 h):
-
-| Model | Config | Trainer / generator | Result |
-|---|---|---|---|
-| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 FSDP / 8 engines TP 8 | 10/10 (this env, 2026-11-09) |
-| Qwen3-14B | `rl_grpo_qwen3_14b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 FSDP, full activation remat / 8 engines TP 8 | healthy at walltime (~4.5 min/step; previous stack) |
-| Qwen3-30B-A3B | `rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_trn_c1_gen_c8_10steps` | 1 x 64 FSDP / 8 engines TP 4 x DP 2, EP 8, vLLM at 0.7 of a tile | 10/10 (this env, 2026-11-09; ~40 min) |
-| gpt-oss-20b | `rl_grpo_gpt_oss_20b_flex_16n_ppn4_trn_c1_gen_c8_10steps` | 1 x 32 FSDP (8 nodes x 4) / 8 engines TP 4, EP 4, vLLM at 0.7 | healthy at walltime (previous stack) |
-
-Not retried, and why: MoE with one copy per 8-tile node runs out of memory at step 2; vLLM at the default 0.9 of
-a tile fails the first forward (`UR_RESULT_ERROR_OUT_OF_RESOURCES`); Qwen3-1.7B at 1 x 96 exceeds the 30-min gloo
-timeout. Rules: FSDP shards divide the FFN width and expert count; TP divides the KV heads; MoE needs one trainer
-copy over all trainer nodes and `gpu_memory_limit` 0.7. Two 10/10 runs fail the logprob-parity check
-([known issue](#known-issues)).
-
-### 8. Logprob parity (trainer vs generator)
-
-Every run prints `bit_wise/` metrics. Mean log-ratio: Qwen3-0.6B ~-0.0007, Qwen3-30B-A3B ~-0.01 (~7% of tokens
-differ). The max exceeds 10 on the larger models ([known issue](#known-issues)).
+Per run: config, nodes x tiles, steps reached, mesh, pass / fail, and the `train.log` path of any failure; any build
+step that failed or needed a change; `pip list` of the env.
 
 ## XPU settings and why
 
@@ -325,9 +273,9 @@ cross-node broadcasts deliver nothing), and the first weight pull runs one gener
 
 - **A finished run exits with status 1** (teardown abort after the last step; `undeliverable ... generate()` after
   `Closing:` too). Judge a run by its step lines.
-- **Larger models: logprob-parity max > 10** (open). Qwen3-1.7B upstream layout 13.3, Qwen3-30B-A3B at 16 nodes 24.4
-  (Qwen3-14B on the previous stack); the mean stays small and training runs 10/10. The report fails these runs on
-  that check; they do not crash. Cause unknown (vLLM vs trainer numerics on XPU); report the `bit_wise/` metrics.
+- **Larger models: the logprob-parity max can exceed 10** (open). The generator's and trainer's log-probs differ by
+  more than 10 at the worst token on the larger models while the mean stays small and training completes; the
+  regression report then flags the run on that check. Report the `bit_wise/` metrics; the cause is not yet known.
 - **Two trainer copies spanning nodes hang** (FSDP2 HSDP on XPU, also without RL). Use one copy per node or one over
   all trainer nodes.
 - **128 oneCCL communicators per process**: keep one copy's `dp_shard` under ~100 (beyond: `code 11`).

@@ -1,9 +1,10 @@
 # XPU RL roadmap: GRPO on Intel XPU vs upstream CUDA
 
 What it takes to run upstream torchtitan RL (async GRPO: Monarch actors, TorchStore weight sync, vLLM generation,
-FSDP2 training) on Intel XPU, and how far each piece is. The how-to and the expected result of every experiment are in
-[xpu_torch215.md](xpu_torch215.md); this file is the gap list. Updated 2026-11-07; update after every step (set the
-status, add the date). Start point: upstream torchtitan RL ran on CUDA only, and nothing in the stack worked on XPU.
+FSDP2 training) on Intel XPU, and how far each piece is. This file is the gap list; how to build, run and validate
+the stack is [xpu_torch215.md](xpu_torch215.md), and every experiment with its results is
+[xpu_rl_experiments.md](xpu_rl_experiments.md). Updated 2026-11-09; update after every step (set the status, add the
+date). Start point: upstream torchtitan RL ran on CUDA only, and nothing in the stack worked on XPU.
 
 Contents: [Phases](#phases) - [Phase 0](#phase-0----each-component-on-xpu) -
 [Phase 1](#phase-1----qwen3-06b-grpo-end-to-end) - [Phase 2](#phase-2----bigger-models-more-parallelism) -
@@ -37,13 +38,13 @@ phase 3A (CXI) trains GRPO with NIXL weights and rollouts on 2-16 nodes; phase 3
 |---|---|---|
 | TC L0-L4 | environment, libraries, one node, many processes, two nodes | `check_env.sh`, `check_lib.sh`, `check_compute.pbs` ([check the env](xpu_torch215.md#check-the-env-on-compute-nodes)) |
 | L5 `<name>` | standalone reproducer of one failure | claude-skills `xpu_reproducers/<name>` |
-| R1 | smoke | [experiment 1](xpu_torch215.md#1-smoke-after-every-stack-change) |
-| R2 | Monarch: rollouts, 96-actor fan-out | [experiment 2](xpu_torch215.md#2-basic-regression-18-runs-the-gate-for-any-code-change) |
-| R3 | TorchStore: weight transport | [experiment 3](xpu_torch215.md#3-weight-transport-at-scale) |
-| R4 | trainer parallelism (`trn_*` variants) | [experiment 4](xpu_torch215.md#4-trainer-scaling-one-copy-generators-12-single-tile-engines-on-the-last-node) |
-| R5 | generator parallelism (`gen_*` variants) | [experiment 5](xpu_torch215.md#5-generator-scaling-one-engine-trainer-fixed) |
-| R6 | both sides at scale | [experiment 6](xpu_torch215.md#6-both-sides-at-scale) |
-| step 7 / 7b | larger models | [experiment 7](xpu_torch215.md#7-larger-models-flex-attention-config-10-steps) |
+| R1 | smoke | [experiment 1](xpu_rl_experiments.md#1-smoke-after-every-stack-change) |
+| R2 | Monarch: rollouts, 96-actor fan-out | [experiment 2](xpu_rl_experiments.md#2-basic-regression-18-runs-the-gate-for-any-code-change) |
+| R3 | TorchStore: weight transport | [experiment 3](xpu_rl_experiments.md#3-weight-transport-at-scale) |
+| R4 | trainer parallelism (`trn_*` variants) | [experiment 4](xpu_rl_experiments.md#4-trainer-scaling-one-copy-generators-12-single-tile-engines-on-the-last-node) |
+| R5 | generator parallelism (`gen_*` variants) | [experiment 5](xpu_rl_experiments.md#5-generator-scaling-one-engine-trainer-fixed) |
+| R6 | both sides at scale | [experiment 6](xpu_rl_experiments.md#6-both-sides-at-scale) |
+| step 7 / 7b | larger models | [experiment 7](xpu_rl_experiments.md#7-larger-models-flex-attention-config-10-steps) |
 | `parity`, `scaling`, `soak` | deep experiments | claude-skills `xpu_grpo_regression` |
 | transport E1-E5, layers | RDMA probes, microbenchmarks, GRPO A/B | `~/git/claude-skills/knowledge/xpu_rl/transport_experiments_results.md` |
 
@@ -56,12 +57,12 @@ Latest results: `~/git/claude-skills/knowledge/xpu_rl/regression_report.md`; fix
 
 | # | Item | XPU now | Test | Status | Upstream |
 |---|---|---|---|---|---|
-| 0-S1 | PyTorch with XPU | torch 2.14.0+xpu / 2.15 nightly, triton-xpu | TC L1-L2 | done 10-05 | -- |
-| 0-S2 | oneAPI / oneCCL | oneAPI 2026.1; envs `monarch_t215` (default since 10-28: torch 2.15 nightly, oneCCL 2022.1.2) and `monarch_t214` (torch 2.14, oneCCL 2022.1.1) | TC L0, L4 | done 10-28 | -- |
+| 0-S1 | PyTorch with XPU | torch 2.15.0+xpu (release; was 2.14.0 / 2.15 nightly), triton-xpu 3.9.0 | TC L1-L2 | done 11-09 | -- |
+| 0-S2 | oneAPI / oneCCL | oneAPI 2026.1, oneCCL 2022.1.2; env `monarch_t215` = torch 2.15.0 + Monarch upstream main (rebuilt 11-09: compute checks, smoke 4/4, basic 18/18); `monarch_t214` (torch 2.14) kept as the old baseline | TC L0, L4 | done 11-09 | -- |
 | 0-S3 | RMSNorm backward, large batches | stock kernel fixed | TC L2 | done 09-14 | torch-xpu-ops #4790 (merged) |
 | 0-S4 | oneCCL bugs with C reproducers (#222 broadcast scale-out, #223 worker affinity, #225 concurrent communicator creation) | workarounds in place (0-T4, 1-T6, 2-V1) | L5 | workaround | oneCCL #222-#225 filed, no fixes yet |
 | 0-S5 | A process that used an XCCL group segfaults at exit (one rank, after all checks pass) | 24/24 runs, torch 2.14 + 2.15; clean without a process group; harmless for GRPO, fails 2-node test launchers | L5 `xccl_exit_segfault` | FAILS 11-04 | to file: torch-xpu-ops `ProcessGroupXCCL` or oneCCL |
-| 0-S6 | Same torch as upstream main (CUDA uses the nightly) | vLLM XPU pins torch 2.14 | -- | todo | vLLM XPU pin |
+| 0-S6 | Same torch / vLLM as upstream main (CUDA uses the nightlies) | vLLM main pins torch 2.15.0 for XPU, but drops the PassConfig sequence-parallel fields torchtitan's generator passes (#60517), so we stay on vLLM `083060d04` | -- | todo | torchtitan generator for post-#60517 vLLM |
 
 ### Monarch
 
@@ -168,7 +169,7 @@ node). Upstream's base recipe: 2 GPUs, TP 2.
 | 2-T2 | HSDP, 2 copies across nodes | hangs in FSDP2 HSDP on oneCCL (`trn_c2` 2 x 48, both arms, 0 steps, re-confirmed 10-29) | R4 `trn_c2`; L5 `fsdp2_hsdp_hang` | FAILS 10-29 | to file (repro ready; where: user decides) |
 | 2-T3 | Pipeline parallel (#3980); upstream skips per-edge P2P groups on XCCL | not tried | -- | todo | -- |
 | 2-T4 | Context parallel (#5424) | not tried | -- | todo | -- |
-| 2-T5 | Larger models with upstream's recipes (Qwen3-1.7B, 14B, 30B-A3B, gpt-oss-20b) | flex attention. Pass: 1.7B and 14B on upstream layouts and on 16n 8 x 8 + 8 TP-8 engines; 30B-A3B 1 x 64 and gpt-oss-20b 1 x 32 on 16n with 8 engines. Fail: MoE with one copy per node (step-2 OOM); upstream MoE layouts -- 30B-A3B (trainer FSDP 2 x TP 2 x EP 4) exits at generator start with oneCCL KVS errors (open, the parity gap), gpt-oss-20b's 2-tile trainer does not fit 64 GB tiles. Table: [experiment 7](xpu_torch215.md#7-larger-models-flex-attention-config-10-steps). Open: logprob-parity max > 10 on 1.7B / 14B / 30B-A3B (mean small) | step 7 / 7b | workaround 10-29 | -- |
+| 2-T5 | Larger models with upstream's recipes (Qwen3-1.7B, 14B, 30B-A3B, gpt-oss-20b) | flex attention. Pass: 1.7B and 14B on upstream layouts and on 16n 8 x 8 + 8 TP-8 engines; 30B-A3B 1 x 64 and gpt-oss-20b 1 x 32 on 16n with 8 engines. Fail: MoE with one copy per node (step-2 OOM); upstream MoE layouts -- 30B-A3B (trainer FSDP 2 x TP 2 x EP 4) exits at generator start with oneCCL KVS errors (open, the parity gap), gpt-oss-20b's 2-tile trainer does not fit 64 GB tiles. Table: [experiment 7](xpu_rl_experiments.md#7-larger-models-flex-attention-config-10-steps). Open: logprob-parity max > 10 on 1.7B / 14B / 30B-A3B (mean small) | step 7 / 7b | workaround 10-29 | -- |
 | 2-T6 | Newer architectures: Qwen3.5 / 3.6 (GDN), Kimi K3 (KDA), MXFP8 / NVFP4 | GDN needs NVIDIA-only CuTe kernels; MXFP8 / NVFP4 need SM100 | -- | todo | XPU kernels (torch-xpu-ops / Triton) |
 | 2-T7 | Tasks: DAPO-Math, Search-R1, Verifiers, Terminal-Bench | not tried | -- | todo | -- |
 | 2-T8 | Bitwise parity (batch-invariant kernels) | not tried | -- | todo | -- |
