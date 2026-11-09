@@ -172,6 +172,7 @@ node). Upstream's base recipe: 2 GPUs, TP 2.
 | 2-T6 | Newer architectures: Qwen3.5 / 3.6 (GDN), Kimi K3 (KDA), MXFP8 / NVFP4 | GDN needs NVIDIA-only CuTe kernels; MXFP8 / NVFP4 need SM100 | -- | todo | XPU kernels (torch-xpu-ops / Triton) |
 | 2-T7 | Tasks: DAPO-Math, Search-R1, Verifiers, Terminal-Bench | not tried | -- | todo | -- |
 | 2-T8 | Bitwise parity (batch-invariant kernels) | not tried | -- | todo | -- |
+| 2-T9 | GraphTrainer (`torchtitan/experiments/graph_trainer`): the whole train step as one FX graph, SimpleFSDP, graph passes (comm bucketing, async TP, Inductor regional / full, CUDA graphs, CPU offload); CI is CUDA only; RL does not use it yet | not tried on XPU; needs the latest PyTorch nightly; CUDA graphs and async TP (symmetric memory) need XPU equivalents | -- | todo | torchtitan experiment |
 
 ### vLLM (generator)
 
