@@ -43,7 +43,7 @@ phase 3A (CXI) trains GRPO with NIXL weights and rollouts on 2-16 nodes; phase 3
 | R4 | trainer parallelism (`trn_*` variants) | [experiment 4](xpu_torch215.md#4-trainer-scaling-one-copy-generators-12-single-tile-engines-on-the-last-node) |
 | R5 | generator parallelism (`gen_*` variants) | [experiment 5](xpu_torch215.md#5-generator-scaling-one-engine-trainer-fixed) |
 | R6 | both sides at scale | [experiment 6](xpu_torch215.md#6-both-sides-at-scale) |
-| step 7 / 7b | larger models | [experiment 7](xpu_torch215.md#7-larger-models-flex-attention-config-16-nodes-10-steps-walltime-1-2-h) |
+| step 7 / 7b | larger models | [experiment 7](xpu_torch215.md#7-larger-models-flex-attention-config-10-steps) |
 | `parity`, `scaling`, `soak` | deep experiments | claude-skills `xpu_grpo_regression` |
 | transport E1-E5, layers | RDMA probes, microbenchmarks, GRPO A/B | `~/git/claude-skills/knowledge/xpu_rl/transport_experiments_results.md` |
 
@@ -168,7 +168,7 @@ node). Upstream's base recipe: 2 GPUs, TP 2.
 | 2-T2 | HSDP, 2 copies across nodes | hangs in FSDP2 HSDP on oneCCL (`trn_c2` 2 x 48, both arms, 0 steps, re-confirmed 10-29) | R4 `trn_c2`; L5 `fsdp2_hsdp_hang` | FAILS 10-29 | to file (repro ready; where: user decides) |
 | 2-T3 | Pipeline parallel (#3980); upstream skips per-edge P2P groups on XCCL | not tried | -- | todo | -- |
 | 2-T4 | Context parallel (#5424) | not tried | -- | todo | -- |
-| 2-T5 | Larger models with upstream's recipes (Qwen3-1.7B, 14B, 30B-A3B, gpt-oss-20b) | flex attention. Pass: 1.7B and 14B on upstream layouts and on 16n 8 x 8 + 8 TP-8 engines; 30B-A3B 1 x 64 and gpt-oss-20b 1 x 32 on 16n with 8 engines. Fail: MoE with one copy per node (step-2 OOM), upstream MoE layouts. Open: logprob-parity max > 10 on 1.7B / 14B / 30B-A3B (mean small) | step 7 / 7b | workaround 10-29 | -- |
+| 2-T5 | Larger models with upstream's recipes (Qwen3-1.7B, 14B, 30B-A3B, gpt-oss-20b) | flex attention. Pass: 1.7B and 14B on upstream layouts and on 16n 8 x 8 + 8 TP-8 engines; 30B-A3B 1 x 64 and gpt-oss-20b 1 x 32 on 16n with 8 engines. Fail: MoE with one copy per node (step-2 OOM); upstream MoE layouts -- 30B-A3B (trainer FSDP 2 x TP 2 x EP 4) exits at generator start with oneCCL KVS errors (open, the parity gap), gpt-oss-20b's 2-tile trainer does not fit 64 GB tiles. Table: [experiment 7](xpu_torch215.md#7-larger-models-flex-attention-config-10-steps). Open: logprob-parity max > 10 on 1.7B / 14B / 30B-A3B (mean small) | step 7 / 7b | workaround 10-29 | -- |
 | 2-T6 | Newer architectures: Qwen3.5 / 3.6 (GDN), Kimi K3 (KDA), MXFP8 / NVFP4 | GDN needs NVIDIA-only CuTe kernels; MXFP8 / NVFP4 need SM100 | -- | todo | XPU kernels (torch-xpu-ops / Triton) |
 | 2-T7 | Tasks: DAPO-Math, Search-R1, Verifiers, Terminal-Bench | not tried | -- | todo | -- |
 | 2-T8 | Bitwise parity (batch-invariant kernels) | not tried | -- | todo | -- |

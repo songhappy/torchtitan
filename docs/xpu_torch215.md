@@ -322,21 +322,32 @@ Result: 12/12. Generator TP must divide the model's KV heads (8 for Qwen3-0.6B),
 The default layout at 4 and 8 nodes x 12 tiles, and `BATCH_SCALED=1` (the batch sized to the trainer;
 `NUM_STEPS=10` or `30`, `PPN=4` or `12`) on 2-16 nodes: 12/12.
 
-### 7. Larger models (flex attention; `CONFIG=...`, 16 nodes, 10 steps, walltime 1-2 h)
+### 7. Larger models (flex attention; `CONFIG=...`, 10 steps)
 
 Link each model under `assets/hf/` first (`/lus/flare/projects/Aurora_deployment/intel/models/<name>`; gpt-oss uses
-`gpt-oss-20b-BF16`). The upstream recipes use varlen attention, which has no XPU kernel; the `_flex` configs rebuild
-them on flex attention, load the HF weights and save no checkpoint.
+`gpt-oss-20b-BF16`). The upstream recipes use varlen attention, which has no XPU kernel; the `_flex` configs keep
+each recipe as is (model, seq_len 2048, 8 samples per prompt, prompts per step, `max_tokens` 700, optimizer) and only
+rebuild its models on flex attention. The `_16n_...` configs also change the layout to scale out over 16 nodes
+(FSDP data parallelism instead of trainer TP / EP) and save no checkpoint.
 
-| Model | Config | Layout | Result |
+**Upstream layout** (`rl_grpo_<model>_flex`):
+
+| Model | Upstream layout: trainer / generator | Nodes | Result on XPU |
 |---|---|---|---|
-| Qwen3-1.7B (dense) | `rl_grpo_qwen3_1_7b_flex` | upstream, 1 node | pass |
-| Qwen3-14B (dense) | `rl_grpo_qwen3_14b_flex` | upstream, 2 nodes, TP 8 per side | pass |
-| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 trainer, 8 TP-8 engines | 10/10 |
-| Qwen3-14B | `rl_grpo_qwen3_14b_flex_16n_ppn8_gen_c8_10steps` | same | healthy at walltime (~4.5 min/step) |
-| Qwen3-30B-A3B (MoE, 128 experts) | `rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_trn_c1_gen_c8_10steps` | 1 x 64 trainer, 8 TP4 x DP2 / EP8 engines, vLLM at 0.7 of a tile | 10/10 |
-| gpt-oss-20b (MoE, 32 experts) | `rl_grpo_gpt_oss_20b_flex_16n_ppn4_trn_c1_gen_c8_10steps` | 1 x 32 trainer (8 nodes x 4), 8 TP4 / EP4 engines, vLLM at 0.7 | healthy at walltime |
-| Qwen3.5-9B / Qwen3.6-27B | `rl_grpo_qwen3_5_9b_flex...` | any | blocked: vLLM's GDN path needs NVIDIA-only CuTe kernels |
+| Qwen3-1.7B (dense) | TP 2 / one engine TP 4 (6 GPUs) | 1 | pass |
+| Qwen3-14B (dense) | TP 8 / one engine TP 8 (16 GPUs) | 2 | pass |
+| Qwen3-30B-A3B (MoE, 128 experts) | FSDP 2 x TP 2 x EP 4 / DP 2 x TP 2 x EP 4 (8 GPUs) | 1 | fail: exits at generator start with oneCCL KVS errors (open) |
+| gpt-oss-20b (MoE, 32 experts) | TP 2 x EP 2 / TP 4 x EP 4; 5 prompts per step | 1 | fail: trainer out of memory (20B on 2 tiles of 64 GB) |
+| Qwen3.5-9B / Qwen3.6-27B (GDN) | -- | -- | blocked: vLLM's GDN path needs NVIDIA-only CuTe kernels |
+
+**16-node layouts** (first 8 nodes train, last 8 generate; `-l select=16 -q capacity`, walltime 1-2 h):
+
+| Model | Config | Trainer / generator | Result |
+|---|---|---|---|
+| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 FSDP / 8 engines TP 8 | 10/10 |
+| Qwen3-14B | `rl_grpo_qwen3_14b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 FSDP, full activation remat / 8 engines TP 8 | healthy at walltime (~4.5 min/step) |
+| Qwen3-30B-A3B | `rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_trn_c1_gen_c8_10steps` | 1 x 64 FSDP / 8 engines TP 4 x DP 2, EP 8, vLLM at 0.7 of a tile | 10/10 |
+| gpt-oss-20b | `rl_grpo_gpt_oss_20b_flex_16n_ppn4_trn_c1_gen_c8_10steps` | 1 x 32 FSDP (8 nodes x 4) / 8 engines TP 4, EP 4, vLLM at 0.7 | healthy at walltime |
 
 What fails, and why (so these are not retried): a MoE model with one copy per 8-tile node runs out of device memory
 at step 2 when Adam's state appears (~39 GiB gpt-oss, ~57 GiB 30B-A3B per tile); vLLM at the default 0.9 of a tile
