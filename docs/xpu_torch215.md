@@ -1,7 +1,7 @@
 # GRPO on Intel XPU (Aurora, torch 2.15)
 
 This branch runs end-to-end GRPO on Aurora (Intel Data Center GPU Max 1550) with the upstream torchtitan RL stack --
-Monarch actors, TorchStore weight sync, vLLM generation, FSDP2 training -- on **torch 2.15 (XPU nightly) and oneCCL
+Monarch actors, TorchStore weight sync, vLLM generation, FSDP2 training -- on **torch 2.15.0 (XPU release) and oneCCL
 2022**, on top of upstream torchtitan main. It is written so a validation engineer can rebuild the stack, rerun every
 experiment below and check each run against the expected result.
 
@@ -38,10 +38,27 @@ dataset cached once on the UAN (runs set `HF_HUB_OFFLINE=1`):
 | Repo | Branch | Commit | Contents |
 |------|--------|--------|----------|
 | torchtitan | this branch | -- | upstream main + the XPU RL commits, launcher, recipes, this guide |
-| monarch | `xpu-all` (github.com/songhappy/monarch) | `2f1637ca6` | upstream main `62ea16e40` + PR #4307 (XPU actor runtime); `PBSJob` is upstream (#5067) |
+| monarch | upstream `main` (github.com/meta-pytorch/monarch) | `a0c586486` | no local patches: the XPU actor runtime (#4307) and `PBSJob` (#5067) are merged |
 | torchstore | `xpu-all` (github.com/songhappy/torchstore) | `3edc47f` | upstream main `e500a6f` + PR #171 (XCCL transport), #201 (replicated regions fetched once), the routing fix 16 nodes x 12 tiles needs, accelerator stream sync |
 | vLLM | upstream `main` | `083060d04` | no local patches |
-| vllm-xpu-kernels | `release/0.1.15.4` | -- | built from source (no wheel exists for torch 2.15) |
+| vllm-xpu-kernels | `release/0.1.15.4` | -- | built from source against torch 2.15.0 (the 0.1.15.4 wheel is built for torch 2.14) |
+
+Why vLLM stays at `083060d04` although newer vLLM pins torch 2.15.0: vLLM #60517 (2026-10-08) removed the
+`PassConfig` sequence-parallel fields that torchtitan's generator passes (upstream torchtitan main too, as of
+2026-11-09), and every vLLM that pins torch 2.15.0 comes after it.
+
+### Changes from the previous version of this guide
+
+| Layer | Previous (torch 2.15 nightly) | Now |
+|---|---|---|
+| torch / torchvision | 2.15.0.dev20261005 / 0.30.0.dev20261005 (nightly) | **2.15.0 / 0.29.2** (release) |
+| triton-xpu | 3.9.0 (nightly build) | 3.9.0 (release) + vLLM's `triton==3.9.0+xpu` placeholder |
+| Monarch | fork `songhappy/monarch` `xpu-all` `2f1637ca6` | **upstream `main` `a0c586486`** (no fork) |
+| vllm-xpu-kernels | 0.1.15.4 from source vs the nightly | 0.1.15.4 from source vs torch 2.15.0 (same CI ocloc) |
+| vLLM, TorchStore | `083060d04`, fork `xpu-all` `3edc47f` | unchanged |
+| oneAPI / oneCCL / SYCL runtime | 2026.1 / 2022.1.2 / 2026.1.2 | unchanged (torch 2.15.0 requires the same) |
+| transformers / renderers | 5.20.2 / 0.1.11 | 5.22.2 / 0.1.12 |
+| Build steps | -- | re-activate the env after step 2 (below) |
 
 ```bash
 export TORCHTITAN_DIR=$HOME/git/torchtitan    # this branch
@@ -61,23 +78,29 @@ conda install -y -c conda-forge rust=1.97.1
 Never source a oneAPI 2025.x environment in the same shell: torch ships the 2026.1 SYCL runtime, and two SYCL
 runtimes in one process segfault.
 
-### 2. torch 2.15, Triton and vLLM's other requirements
+### 2. torch 2.15.0, Triton and vLLM's other requirements
 
-vLLM's `requirements/xpu.txt` pins torch 2.14; install the 2.15 nightly instead and everything else from that file:
+vLLM `083060d04`'s `requirements/xpu.txt` pins torch 2.14; install torch 2.15.0 instead and everything else from that
+file:
 
 ```bash
 git clone https://github.com/vllm-project/vllm.git $VLLM_DIR && cd $VLLM_DIR && git checkout 083060d04
-pip install --pre "torch==2.15.0.dev20261005+xpu" "torchvision==0.30.0.dev20261005+xpu" \
-    --index-url https://download.pytorch.org/whl/nightly/xpu --extra-index-url https://pypi.org/simple
+pip install "torch==2.15.0+xpu" "torchvision==0.29.2+xpu" \
+    --index-url https://download.pytorch.org/whl/xpu --extra-index-url https://pypi.org/simple
+pip install "triton==3.9.0+xpu" --no-deps --index-url https://wheels.vllm.ai/xpu/   # placeholder for xgrammar
 grep -vE "^(torch|torchaudio|torchvision|triton|vllm_xpu_kernels)\b" requirements/xpu.txt \
     | sed "s#^-r common.txt#-r $VLLM_DIR/requirements/common.txt#" > /tmp/vllm_reqs.txt
-pip install -r /tmp/vllm_reqs.txt --constraint <(echo "torch==2.15.0.dev20261005+xpu") \
+pip install -r /tmp/vllm_reqs.txt --constraint <(echo "torch==2.15.0+xpu") \
     --extra-index-url https://download.pytorch.org/whl/xpu
+conda deactivate && conda activate monarch_t215   # required, see below
 python -c "import torch, triton.language; print(torch.__version__)"   # xpu.is_available() is False on a UAN
 ```
 
-The nightly brings triton-xpu 3.9.0, oneccl 2022.1.2 and intel-sycl-rt 2026.1.2. If `import triton.language` fails,
-another package overwrote `triton-xpu`: reinstall it with `--force-reinstall --no-deps`.
+torch 2.15.0 brings triton-xpu 3.9.0, oneccl 2022.1.2 and intel-sycl-rt 2026.1.2. The `oneccl` wheel adds conda
+activation hooks that put the env's `lib/` first on `LD_LIBRARY_PATH`; they only take effect on activation, so
+without the re-activation `import torch` fails in that shell (`libsycl.so.9: undefined symbol: urGraphGetIdExp`). The
+`triton` placeholder keeps xgrammar from pulling stock (CUDA) Triton over `triton-xpu`; if `import triton.language`
+still fails, reinstall `triton-xpu` with `--force-reinstall --no-deps`.
 
 ### 3. vllm-xpu-kernels from source (~3 h)
 
@@ -119,7 +142,7 @@ cd $VLLM_DIR && VLLM_TARGET_DEVICE=xpu VLLM_REQUIRE_RUST_FRONTEND=1 pip install 
 ### 5. Monarch (~20-30 min)
 
 ```bash
-git clone -b xpu-all https://github.com/songhappy/monarch.git $MONARCH_DIR && cd $MONARCH_DIR && git checkout 2f1637ca6
+git clone https://github.com/meta-pytorch/monarch.git $MONARCH_DIR && cd $MONARCH_DIR && git checkout a0c586486
 GCC=/opt/aurora/26.181.0/spack/unified/1.1.1/install/linux-x86_64/gcc-13.4.0-22p27zg/bin
 LLVM=/opt/aurora/26.181.0/spack/unified/1.1.1/install/linux-x86_64/llvm-develop-git.87717bf-7gy6r7k
 pip install "setuptools-rust>=1.9.0"
@@ -137,7 +160,8 @@ Why: `USE_TENSOR_ENGINE=0` builds only the actor runtime RL uses; `RUSTC_BOOTSTR
 nightly flags `setup.py` passes; `PROTOC` is the one torch bundles; `CC`/`CXX` must be GNU gcc (13.4 tested; the
 oneAPI env sets `CC=icx`, whose intrinsics GNU `ld` cannot link); the cargo linker replaces conda's, whose sysroot
 lacks the glibc 2.38 symbols `aws-lc-sys` needs; `LIBCLANG_PATH` / `BINDGEN_EXTRA_CLANG_ARGS` let `libsqlite3-sys`
-find libclang. Rebuild Monarch after any torch change.
+find libclang. Rebuild Monarch after any torch change. pip warns that `torchmonarch` requires `nvidia-ml-py`; it is
+not needed on XPU.
 
 ### 6. TorchStore
 
@@ -157,23 +181,35 @@ TorchTitan runs from the source tree and is not pip-installed. Install its requi
 ```bash
 cd $TORCHTITAN_DIR
 grep -v "^torchmonarch" torchtitan/rl/requirements.txt > /tmp/rl_reqs.txt
-pip install -r requirements.txt -r /tmp/rl_reqs.txt torchdata==0.11.0 tyro==1.0.15 \
-    --constraint <(echo "torch==2.15.0.dev20261005+xpu")
+pip install -r requirements.txt -r /tmp/rl_reqs.txt torchdata==0.11.0 tyro==1.0.15 matplotlib \
+    --constraint <(echo "torch==2.15.0+xpu")
 ```
 
 `attn-gym[linear]` brings CUDA-only packages (`nvidia-cutlass-dsl`, `cuda-bindings`); they are unused on XPU.
 
 ### Reference versions (`pip list` of the validated env)
 
+RL stack:
+
+| Component | pip name / version | Commit | Source, install |
+|---|---|---|---|
+| torchtitan | -- (runs from the source tree) | this branch | github.com/songhappy/torchtitan `rl-xpu-aurora-torch215` |
+| Monarch | `torchmonarch` 0.8.0.dev0 | `a0c586486` | github.com/meta-pytorch/monarch `main`, editable Rust build (step 5) |
+| TorchStore | `torchstore` 0.0.0.dev0 | `3edc47f` | github.com/songhappy/torchstore `xpu-all`, editable, `--no-deps` (step 6) |
+| vLLM | `vllm` 0.30.1rc1.dev523+g083060d04.xpu | `083060d04` | github.com/vllm-project/vllm `main`, editable (step 4) |
+| vllm-xpu-kernels | `vllm-xpu-kernels` 0.1.15.4 | `release/0.1.15.4` | built from source against torch 2.15.0 with the CI ocloc (step 3) |
+
+PyTorch and Intel runtime:
+
 | Package | Version | Package | Version |
-|---------|---------|---------|---------|
-| python | 3.12.15 | torchmonarch | 0.8.0.dev0 (editable, `2f1637ca6`) |
-| torch | 2.15.0.dev20261005+xpu | torchstore | 0.0.0.dev0 (editable, `3edc47f`) |
-| torchvision | 0.30.0.dev20261005+xpu | vllm | 0.30.1rc1.dev523+g083060d04.xpu (editable) |
-| triton-xpu | 3.9.0 | vllm-xpu-kernels | 0.1.15.4 (source) |
-| oneccl | 2022.1.2 | transformers | 5.20.2 |
-| intel-sycl-rt | 2026.1.2 | datasets | 4.7.0 |
-| spmd_types | 0.3.1 | torchdata / tyro / renderers | 0.11.0 / 1.0.15 / 0.1.11 |
+|---|---|---|---|
+| python | 3.12 | oneccl | 2022.1.2 |
+| torch | 2.15.0+xpu | intel-sycl-rt | 2026.1.2 |
+| torchvision | 0.29.2+xpu | oneAPI (module, `env_torch215.sh`) | 2026.1 |
+| triton-xpu / triton | 3.9.0 / 3.9.0+xpu (placeholder) | | |
+
+Python libraries: transformers 5.22.2, datasets 4.7.0, huggingface_hub 1.33.0, spmd_types 0.3.1, torchdata 0.11.0,
+tyro 1.0.15, renderers 0.1.12.
 
 ### Check the env on compute nodes
 
@@ -225,7 +261,10 @@ hosts and runs `torchtitan.rl.train`.
 
 ## Experiments and expected results
 
-All results below are on this env (torch 2.15), 2026-10-28 .. 11-04. Model: Qwen3-0.6B, alphabet-sort task, 0/1
+Sections 1-2 are re-run on this env (torch 2.15.0, Monarch upstream main) on 2026-11-09, after the compute-node
+checks (1 and 2 nodes: torch, vLLM generation, the kernels' flash-attention test, cross-node XCCL broadcast, Monarch
+remote spawn) all passed; sections 3-8 were measured 2026-10-28 .. 11-04 on the previous torch 2.15 nightly stack
+(same vLLM, TorchStore, oneCCL). Model: Qwen3-0.6B, alphabet-sort task, 0/1
 reward, `rl_grpo_qwen3_0_6b_{full,lora}_<N>n_ppn<P>[_variant]_<S>steps`, both arms unless noted. Mesh = trainer
 `dp_replicate x dp_shard`.
 
@@ -236,7 +275,7 @@ reward, `rl_grpo_qwen3_0_6b_{full,lora}_<N>n_ppn<P>[_variant]_<S>steps`, both ar
 | 1 node: 2 trainer + 2 generator tiles | `-l select=1 -v ARM=<arm>,NUM_STEPS=2` | 2/2 steps, mesh 1 x 2 |
 | 2 nodes x 4 | `-l select=2 -v ARM=<arm>,NUM_STEPS=2` | 2/2, mesh 1 x 4 |
 
-Result: 4/4.
+Result: 4/4 (2026-11-09, this env).
 
 ### 2. Basic regression (18 runs; the gate for any code change)
 
