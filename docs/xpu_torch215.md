@@ -350,6 +350,10 @@ rebuild its models on flex attention. The `_16n_...` configs also change the lay
 | Qwen3-30B-A3B | `rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_trn_c1_gen_c8_10steps` | 1 x 64 FSDP / 8 engines TP 4 x DP 2, EP 8, vLLM at 0.7 of a tile | 10/10 (this env, 2026-11-09; ~40 min) |
 | gpt-oss-20b | `rl_grpo_gpt_oss_20b_flex_16n_ppn4_trn_c1_gen_c8_10steps` | 1 x 32 FSDP (8 nodes x 4) / 8 engines TP 4, EP 4, vLLM at 0.7 | healthy at walltime (previous stack) |
 
+The regression report also checks logprob parity (max generator-vs-trainer difference <= 10). On this env it
+flags two of the 10/10 runs: Qwen3-1.7B on the upstream layout (max 13.3) and Qwen3-30B-A3B at 16 nodes (max 24.4);
+the mean stays small. This is the open item of section 8, not a crash -- report it, but it is not a new failure.
+
 What fails, and why (so these are not retried): a MoE model with one copy per 8-tile node runs out of device memory
 at step 2 when Adam's state appears (~39 GiB gpt-oss, ~57 GiB 30B-A3B per tile); vLLM at the default 0.9 of a tile
 fails the first forward with `UR_RESULT_ERROR_OUT_OF_RESOURCES` (loading pulled weights holds two copies); Qwen3-1.7B
