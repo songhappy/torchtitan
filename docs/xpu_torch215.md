@@ -230,8 +230,9 @@ Qwen3-0.6B, alphabet sort; `<arm>` = `full` and `lora` (each row is two runs). M
 ### 3. Larger models (2 runs, 2 and 16 nodes)
 
 Link the model under `assets/hf/` first (`ln -sfn /lus/flare/projects/Aurora_deployment/intel/models/<name> assets/hf/<name>`),
-then `qsub -l select=<N> -l walltime=01:00:00 -q capacity -v CONFIG=<config> scripts/rl/xpu/run_grpo.sh`. Expected:
-10/10 steps.
+then `qsub -l select=<N> -l walltime=01:00:00 -q capacity -v CONFIG=<config>,DUMP_FOLDER=<dir> scripts/rl/xpu/run_grpo.sh`
+with `<dir>` on your project's `/lus/flare` space: `rl_grpo_qwen3_14b_flex` (upstream's recipe) saves a full checkpoint
+at step 10, ~166 GB, which overfills a home quota. Expected: 10/10 steps; delete `<dir>/checkpoint` afterwards.
 
 | Model | Config | Nodes |
 |---|---|---|
@@ -282,4 +283,7 @@ cross-node broadcasts deliver nothing), and the first weight pull runs one gener
   `grep -l forward_backward_error $DUMP_FOLDER/structured_logs/rl_trainer*`.
 - **Checkpoint saving is off** (`load_only=True`; the save hung at 16 nodes). Do not disable the checkpointer: it also
   loads the pretrained weights.
+- **Upstream's larger-model recipes save a full checkpoint at step 10** (`rl_grpo_qwen3_14b_flex`: ~166 GB,
+  `rl_grpo_qwen3_1_7b_flex`: ~41 GB): set `DUMP_FOLDER` on `/lus/flare`, not under `$HOME`, and delete the checkpoint
+  after the run. The 16-node layouts save nothing.
 - **vLLM "not enough free memory" at startup**: usually a stale memory report; resubmit.
