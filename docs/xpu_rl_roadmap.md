@@ -9,7 +9,6 @@ date). Start point: upstream torchtitan RL ran on CUDA only, and nothing in the 
 Contents: [Phases](#phases) - [Phase 0](#phase-0----each-component-on-xpu) -
 [Phase 1](#phase-1----qwen3-06b-grpo-end-to-end) - [Phase 2](#phase-2----bigger-models-more-parallelism) -
 [Phase 3](#phase-3----rdma-on-two-intel-platforms-cxi-aurora-and-bmg) - [Platform support](#platform-support) -
-[Known issues](#known-issues-not-gaps) -
 [Notes](#notes)
 
 ## Phases
@@ -149,6 +148,7 @@ Latest results: `~/git/claude-skills/knowledge/xpu_rl/regression_report.md`; fix
 | 1-T20 | Layout parity: upstream TP 2 + TP 2 vs ours, 200 seeded steps | configs ready (local `ed952764d`); not run | explicit `steps200:` runs | todo | -- |
 | 1-T21 | Scaling: both sides 2-16n x 12, batch sized to the trainer | configs ready; not run | explicit `steps30:...:batch_scaled` runs | todo | -- |
 | 1-T22 | Soak: 8n x 12, 1000 steps | config ready; not run | explicit `steps1000:lora:8:12` | todo | -- |
+| 1-T23 | Training throughput vs torch 2.12: full 8-node `fwd_bwd` ~30% slower (22063 vs 32411 tok/s) | not investigated | R2 10-step runs | todo | -- |
 
 ### vLLM (generator in the loop)
 
@@ -268,12 +268,6 @@ builds turn it off).
 | CRI-TS1 | TorchStore | XCCL transport on CRI; RDMA transports once CRI-S3 is known | not run | R3 on CRI | todo | -- |
 | CRI-T1 | torchtitan | GRPO 0.6B smoke and basic on CRI: a launcher for its cluster's scheduler, layouts for its tile count | not started | R1, R2 on CRI | todo | -- |
 | CRI-V1 | vLLM | Generator on CRI first (an inference part): vLLM XPU worker and kernels on Xe3P, generation correctness | not run | `check_compute.pbs` `vllm_generate` on CRI | todo | vLLM / vllm-xpu-kernels |
-
-## Known issues (not gaps)
-
-- Full 8-node `fwd_bwd` is ~30% slower than on torch 2.12 (22063 vs 32411 tok/s); not investigated.
-- A finished run exits with status 1 (teardown); judge runs by their step lines.
-- vLLM TP > 1 dumps core at exit after correct output; the launcher sets `ulimit -c 0`.
 
 ## Notes
 
