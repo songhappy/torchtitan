@@ -256,7 +256,7 @@ hosts and runs `torchtitan.rl.train`.
   models, whose steps take minutes);
 - reward is non-zero from step 1. An occasional `Consecutive untrainable batches: 1/10` is normal; reward 0 with that
   count climbing toward 10 means the generators received zero weights;
-- `grad_norm` (Qwen3-0.6B): LoRA about 0.01-0.5, full about 0.1-4 (full is over all parameters);
+- `grad_norm` (Qwen3-0.6B): LoRA about 0.01-0.8, full about 0.1-5 (full is over all parameters);
 - the `Mesh split` line in `train.log` shows the mesh you expect -- read the mesh from that line, not the flags.
 
 ## Experiments and expected results
@@ -289,7 +289,8 @@ the recipe picks the smallest `dp_replicate` that can.
 | 16 nodes x 4 and 12 | `-l select=16 -q capacity -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2, mesh 8 x P |
 | 1 and 8 nodes x 4, 10 steps | `-l select=<1,8> -v ARM=<arm>` | 10/10, mesh 1 x 2 / 4 x 4 |
 
-Result: 18/18 (rerun 18/18 on Monarch main + #4307, 11-03).
+Result: 18/18 (2026-11-09, this env; `Mesh split` as expected in every run, peak 2134 of 8192 tasks per node and
+128 GB host memory at 16 nodes x 12 tiles).
 
 ### 3. Weight transport at scale
 
