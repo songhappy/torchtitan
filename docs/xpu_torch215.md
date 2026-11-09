@@ -174,7 +174,7 @@ Others: python 3.12, transformers 5.22.2, datasets 4.7.0, huggingface_hub 1.33.0
 
 ### Check the env on compute nodes
 
-Run the smoke ([Validation](#validation), step 1) before anything else: it proves vLLM's kernels (real completions, non-zero reward),
+Run the smoke ([Validation](#validation) 1) before anything else: it proves vLLM's kernels (real completions, non-zero reward),
 Monarch across hosts and TorchStore across nodes.
 
 ## Running
@@ -207,18 +207,18 @@ running, 5 total.
 
 ## Validation
 
-The regression's steps 1, 2 and 7 (the same runs every code change gets). Run them on the env you built, in order,
-and judge each run by [A healthy run](#a-healthy-run) and the expected mesh below (from the `Mesh split` line in `train.log`). Model: Qwen3-0.6B, alphabet sort; `<arm>` = `full` and
-`lora` (each row is two runs). Mesh = trainer `dp_replicate x dp_shard`.
+Three sets of runs, in order, on the env you built (the same runs every code change gets). Judge each run by
+[A healthy run](#a-healthy-run) and the expected mesh below (from the `Mesh split` line in `train.log`). Model:
+Qwen3-0.6B, alphabet sort; `<arm>` = `full` and `lora` (each row is two runs). Mesh = trainer `dp_replicate x dp_shard`.
 
-### Step 1 -- smoke (4 runs, ~30 min)
+### 1. Smoke (4 runs, ~30 min)
 
 | Layout | Submit (`qsub ... scripts/rl/xpu/run_grpo.sh`) | Expected |
 |---|---|---|
 | 1 node: 2 trainer + 2 generator tiles | `-l select=1 -v ARM=<arm>,NUM_STEPS=2` | 2/2 steps, mesh 1 x 2 |
 | 8 nodes x 4 tiles | `-l select=8 -v ARM=<arm>,NUM_STEPS=2` | 2/2, mesh 4 x 4 |
 
-### Step 2 -- basic regression (18 runs, ~2 h plus queue)
+### 2. Basic regression (18 runs, ~2 h plus queue)
 
 | Runs | Submit | Expected |
 |---|---|---|
@@ -227,7 +227,7 @@ and judge each run by [A healthy run](#a-healthy-run) and the expected mesh belo
 | 1 node, 10 steps | `-l select=1 -v ARM=<arm>` | 10/10, mesh 1 x 2 |
 | 8 nodes x 4, 10 steps | `-l select=8 -v ARM=<arm>` | 10/10, mesh 4 x 4 |
 
-### Step 7 -- larger models (6 runs; 16-node time)
+### 3. Larger models (6 runs, 16-node time)
 
 Link the model under `assets/hf/` first (`ln -sfn /lus/flare/projects/Aurora_deployment/intel/models/<name> assets/hf/<name>`;
 gpt-oss: `.../gpt-oss-20b-BF16` as `assets/hf/gpt-oss-20b`), then
