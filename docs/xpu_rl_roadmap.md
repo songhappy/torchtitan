@@ -291,4 +291,4 @@ path only for MonarchRPC and MonarchRDMA: `~/git/claude-skills/knowledge/torchst
 ibverbs (mlx5, EFA) plus a TCP fallback. Aurora compute nodes have 8 Slingshot Cassini NICs (`cxi0-7`) and no
 ibverbs; libfabric 2.3.1 `cxi` offers `FI_RMA`, `FI_READ`, `FI_HMEM` (Level Zero), 24.2 GB/s vs tcp 3.0 GB/s on one
 NIC. oneCCL already uses cxi (two-sided collectives); Gloo and Monarch messages use TCP. Details:
-`~/git/claude-skills/knowledge/xpu_rl/transport_experiments_results.md`.
+`~/git/claude-skills/xpu_rl/transport_experiments_results.md`.
