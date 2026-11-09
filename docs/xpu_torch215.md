@@ -403,6 +403,12 @@ Do not set `CCL_ENABLE_SYCL_KERNELS=0`: FSDP training then segfaults.
 - **A finished run exits with status 1.** Teardown aborts after the last `Train | Step` line; the job ends by itself
   within a minute. Judge a run by its step lines, not the PBS exit status. `undeliverable ... generate()` after
   `Closing:` is part of that teardown, not a failure.
+- **Larger models: the logprob-parity max exceeds 10** (open). The generator's and the trainer's log-probs of the
+  same tokens differ by more than 10 at the worst token on Qwen3-1.7B (upstream layout, max 13.3) and Qwen3-30B-A3B
+  (16 nodes, max 24.4), and on Qwen3-14B on the previous stack, while the mean log-ratio stays small (30B-A3B ~-0.01,
+  ~7% of tokens differ; Qwen3-0.6B ~-0.0007) and training runs 10/10. The regression report fails such a run on
+  this check; it is not a crash. Report the `bit_wise/` metrics (section 8); the cause (attention or kernel numerics
+  between vLLM and the trainer on XPU) is not yet known.
 - **Two trainer copies across nodes hang** (FSDP2 HSDP on XPU): `dp_replicate=2` with each copy spanning nodes stops
   in the first `forward_backward`, no error, until walltime. It reproduces in plain FSDP2 without RL. Use one copy
   per node or one copy over all trainer nodes.
