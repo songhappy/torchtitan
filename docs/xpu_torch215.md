@@ -207,10 +207,11 @@ running, 5 total.
 
 ## Validation
 
-Four sets of runs, in order, on the env you built. Each run must reach its steps; judge it by [A healthy run](#a-healthy-run) and the
-expected meshes below; the `Mesh split` line in `train.log` shows both (1-node runs print none: their layout is fixed). Model:
-Qwen3-0.6B (sets 1-3), alphabet sort; `<arm>` = `full` and `lora` (each row is two runs). Trainer mesh = `dp_replicate x dp_shard` (FSDP) unless it says TP; generator
-mesh = vLLM engines x tiles per engine (tiles per engine = the engine's TP).
+Four sets of runs, in order, on the env you built. Each run must reach its steps; judge it by [A healthy
+run](#a-healthy-run) and the expected meshes below; the `Mesh split` line in `train.log` shows both (1-node runs print
+none: their layout is fixed). Model: Qwen3-0.6B (sets 1-3), alphabet sort; `<arm>` = `full` and `lora` (each row is
+two runs). Trainer mesh = `dp_replicate x dp_shard` (FSDP) unless it says TP; generator mesh = vLLM engines x tiles
+per engine (tiles per engine = the engine's TP).
 
 ### 1. Smoke (4 runs, ~30 min)
 
