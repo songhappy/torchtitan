@@ -207,7 +207,7 @@ running, 5 total.
 
 ## Validation
 
-Three sets of runs, in order, on the env you built (the same runs every code change gets). Judge each run by
+Three sets of runs, in order, on the env you built. Judge each run by
 [A healthy run](#a-healthy-run) and the expected mesh below (from the `Mesh split` line in `train.log`). Model:
 Qwen3-0.6B, alphabet sort; `<arm>` = `full` and `lora` (each row is two runs). Mesh = trainer `dp_replicate x dp_shard`.
 

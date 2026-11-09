@@ -3,7 +3,7 @@
 One entry per experiment: what it tests, how to run it, the latest result. Updated at milestones only; every run's
 full results are in its generated regression report. Build and validate: [xpu_torch215.md](xpu_torch215.md); gaps:
 [xpu_rl_roadmap.md](xpu_rl_roadmap.md). Model Qwen3-0.6B (alphabet sort, both arms) unless noted; mesh = trainer
-`dp_replicate x dp_shard`; "group" = `sweep.sh` step of the regression tooling (`pr` = steps 1, 2, 7; `milestone` = all seven); env = `monarch_t215`.
+`dp_replicate x dp_shard`; "group" = `sweep.sh` step of the regression tooling (`pr` = steps 1, 2, 5, 7; `milestone` = all seven); env = `monarch_t215`.
 
 ### 1. Smoke (after every stack change)
 

@@ -138,7 +138,7 @@ Latest results: `~/git/claude-skills/knowledge/xpu_rl/regression_report.md`; fix
 | 1-T10 | FSDP2, one copy across nodes | `1 x 8 / 16 / 32` pass | R4 (`trn_c1`) | done 10-16 | -- |
 | 1-T11 | FSDP2, one copy over 96 tiles | pass on torch 2.15 (`trn_n8`, both arms, 10-29); intermittent code 11 on torch 2.14 (1-TS4) | R4 `trn_n8` | workaround 10-29 | -- |
 | 1-T12 | Recipes for nodes x tiles x layouts | `alphabet_sort.py` grid (full / LoRA; `trn_c`, `gen_tp`, `trn_t`, `gen_t`, `batch_scaled`; local `847599960`) | R1-R5 | done 10-14 | -- (local recipes) |
-| 1-T13 | Regression suite | `xpu_grpo_regression`: steps 1-7; `pr` (steps 1, 2, 7) per PR, `milestone` (all seven, published report) per milestone | R1-R6 | done 11-09 | -- (our tooling) |
+| 1-T13 | Regression suite | `xpu_grpo_regression`: steps 1-7; `pr` (steps 1, 2, 5, 7) per PR, `milestone` (all seven, published report) per milestone | R1-R6 | done 11-09 | -- (our tooling) |
 | 1-T14 | Scale: 1-16 nodes, 1-12 tiles per node | 25/31; failures = 1-TS4, 2-T2 | R6 | done 10-16 | -- |
 | 1-T15 | Save checkpoint | off (`load_only`); OOM in oneCCL at 8n on torch 2.12 | -- | todo | -- |
 | 1-T16 | Prompt data state in checkpoints (#5114) | not on our base | -- | todo | -- (adopt on rebase) |
