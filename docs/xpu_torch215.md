@@ -203,41 +203,53 @@ running, 5 total.
 - reward non-zero from step 1 (an occasional `Consecutive untrainable batches: 1/10` is fine; climbing to 10 means
   the generators got zero weights);
 - `grad_norm` (Qwen3-0.6B): LoRA ~0.01-0.8, full ~0.1-5;
-- the `Mesh split` line in `train.log` shows the expected mesh.
+- the `Mesh split` line in `train.log` shows the expected trainer and generator meshes (multi-node runs).
 
 ## Validation
 
-Three sets of runs, in order, on the env you built. Judge each run by
-[A healthy run](#a-healthy-run) and the expected mesh below (from the `Mesh split` line in `train.log`). Model:
-Qwen3-0.6B, alphabet sort; `<arm>` = `full` and `lora` (each row is two runs). Mesh = trainer `dp_replicate x dp_shard`.
+Four sets of runs, in order, on the env you built. Judge each run by [A healthy run](#a-healthy-run) and the expected
+meshes below; the `Mesh split` line in `train.log` shows both (1-node runs print none: their layout is fixed). Model:
+Qwen3-0.6B (sets 1-3), alphabet sort; `<arm>` = `full` and `lora` (each row is two runs). Trainer mesh = `dp_replicate x dp_shard` (FSDP) unless it says TP; generator
+mesh = vLLM engines x tiles per engine (tiles per engine = the engine's TP).
 
 ### 1. Smoke (4 runs, ~30 min)
 
-| Layout | Submit (`qsub ... scripts/rl/xpu/run_grpo.sh`) | Expected |
-|---|---|---|
-| 1 node: 2 trainer + 2 generator tiles | `-l select=1 -v ARM=<arm>,NUM_STEPS=2` | 2/2 steps, mesh 1 x 2 |
-| 8 nodes x 4 tiles | `-l select=8 -v ARM=<arm>,NUM_STEPS=2` | 2/2, mesh 4 x 4 |
+| Layout | Submit (`qsub ... scripts/rl/xpu/run_grpo.sh`) | Steps | Trainer mesh | Generator mesh |
+|---|---|---|---|---|
+| 1 node: 2 trainer + 2 generator tiles | `-l select=1 -v ARM=<arm>,NUM_STEPS=2` | 2/2 | 1 x 2 | 2 x 1 (same node) |
+| 8 nodes x 4 tiles | `-l select=8 -v ARM=<arm>,NUM_STEPS=2` | 2/2 | 4 x 4 (nodes 1-4) | 16 x 1 (nodes 5-8) |
 
 ### 2. Basic regression (18 runs, ~2 h plus queue)
 
-| Runs | Submit | Expected |
-|---|---|---|
-| 2 nodes x P tiles, P = 1, 2, 4, 8, 12 | `-l select=2 -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2, mesh 1 x P |
-| 16 nodes x P, P = 4, 12 | `-l select=16 -q capacity -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2, mesh 8 x P |
-| 1 node, 10 steps | `-l select=1 -v ARM=<arm>` | 10/10, mesh 1 x 2 |
-| 8 nodes x 4, 10 steps | `-l select=8 -v ARM=<arm>` | 10/10, mesh 4 x 4 |
+| Runs | Submit | Steps | Trainer mesh | Generator mesh |
+|---|---|---|---|---|
+| 2 nodes x P tiles, P = 1, 2, 4, 8, 12 | `-l select=2 -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2 | 1 x P (node 1) | P x 1 (node 2) |
+| 16 nodes x P, P = 4, 12 | `-l select=16 -q capacity -v ARM=<arm>,PPN=<P>,NUM_STEPS=2` | 2/2 | 8 x P (nodes 1-8) | 8P x 1 (32 / 96; nodes 9-16) |
+| 1 node, 10 steps | `-l select=1 -v ARM=<arm>` | 10/10 | 1 x 2 | 2 x 1 (same node) |
+| 8 nodes x 4, 10 steps | `-l select=8 -v ARM=<arm>` | 10/10 | 4 x 4 (nodes 1-4) | 16 x 1 (nodes 5-8) |
 
-### 3. Larger models (2 runs, 2 and 16 nodes)
+### 3. Generator scaling (12 runs, ~40 min)
+
+One vLLM engine grows by tensor parallelism; the trainer stays one copy on node 1. TP must divide the model's 8 KV
+heads, so an engine spans nodes only on 4-tile nodes.
+
+| Runs | Submit | Steps | Trainer mesh | Generator mesh |
+|---|---|---|---|---|
+| 2 nodes x 12, engine TP A, A = 1, 2, 4, 8 | `-l select=2 -v ARM=<arm>,PPN=12,GEN_TILES=<A>,NUM_STEPS=2` | 2/2 | 1 x 12 (node 1) | 1 x A (node 2) |
+| 3 nodes x 4, one engine over 2 nodes | `-l select=3 -v ARM=<arm>,PPN=4,GEN_NODES=2,NUM_STEPS=2` | 2/2 | 1 x 4 (node 1) | 1 x 8 (nodes 2-3) |
+| 9 nodes x 4, four such engines | `-l select=9 -q capacity -v ARM=<arm>,PPN=4,GEN_NODES=2,GEN_ENGINES=4,NUM_STEPS=2` | 2/2 | 1 x 4 (node 1) | 4 x 8 (nodes 2-9) |
+
+### 4. Larger models (2 runs, 2 and 16 nodes)
 
 Link the model under `assets/hf/` first (`ln -sfn /lus/flare/projects/Aurora_deployment/intel/models/<name> assets/hf/<name>`),
 then `qsub -l select=<N> -l walltime=01:00:00 -q capacity -v CONFIG=<config>,DUMP_FOLDER=<dir> scripts/rl/xpu/run_grpo.sh`
 with `<dir>` on your project's `/lus/flare` space: `rl_grpo_qwen3_14b_flex` (upstream's recipe) saves a full checkpoint
-at step 10, ~166 GB, which overfills a home quota. Expected: 10/10 steps; delete `<dir>/checkpoint` afterwards.
+at step 10, ~166 GB, which overfills a home quota. Delete `<dir>/checkpoint` afterwards.
 
-| Model | Config | Nodes |
-|---|---|---|
-| Qwen3-14B | `rl_grpo_qwen3_14b_flex` | 2 |
-| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 16 |
+| Model | Config | Nodes | Steps | Trainer mesh | Generator mesh |
+|---|---|---|---|---|---|
+| Qwen3-14B | `rl_grpo_qwen3_14b_flex` | 2 | 10/10 | TP 8 (node 1) | 1 x 8 (one TP-8 engine, node 2) |
+| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 16 | 10/10 | 8 x 8 (nodes 1-8) | 8 x 8 (eight TP-8 engines, nodes 9-16) |
 
 ### What to report
 
