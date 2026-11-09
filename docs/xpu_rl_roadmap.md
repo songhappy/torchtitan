@@ -17,7 +17,7 @@ Contents: [Phases](#phases) - [Phase 0](#phase-0----each-component-on-xpu) -
 | Phase | Goal | Model | Tests |
 |---|---|---|---|
 | **0** | each component works on its own on XPU | Qwen3-0.6B where a model is needed | TC L0-L4, L5, each repo's own tests |
-| **1** | small-model GRPO end to end, 1-16 nodes | Qwen3-0.6B, full + LoRA | R1 smoke, R2 Monarch rollouts, R3 TorchStore weights, R6 both sides at scale; deep groups |
+| **1** | small-model GRPO end to end, 1-16 nodes | Qwen3-0.6B, full + LoRA | R1 smoke, R2 basic regression, R3 TorchStore weights, R6 both sides at scale |
 | **2** | bigger models, more parallelism on trainer and generator | Qwen3-1.7B .. 30B-A3B, gpt-oss-20b | R4 trainer parallelism, R5 generator parallelism, step 7 / 7b models |
 | **3** | RDMA: one-sided weight and rollout transfer; tracks 3A CXI (Aurora: PVC + Slingshot) and 3B BMG (Arc Battlemage) | Qwen3-0.6B, then 30B-A3B | transport layers; R3 cells A/B against XCCL |
 
@@ -40,13 +40,12 @@ phase 3A (CXI) trains GRPO with NIXL weights and rollouts on 2-16 nodes; phase 3
 | TC L0-L4 | environment, libraries, one node, many processes, two nodes | `check_env.sh`, `check_lib.sh`, `check_compute.pbs` ([check the env](xpu_torch215.md#check-the-env-on-compute-nodes)) |
 | L5 `<name>` | standalone reproducer of one failure | claude-skills `xpu_reproducers/<name>` |
 | R1 | smoke | [experiment 1](xpu_rl_experiments.md#1-smoke-after-every-stack-change) |
-| R2 | Monarch: rollouts, 96-actor fan-out | [experiment 2](xpu_rl_experiments.md#2-basic-regression-18-runs-the-gate-for-any-code-change) |
+| R2 | basic regression (incl. Monarch rollouts, 96-actor fan-out) | [experiment 2](xpu_rl_experiments.md#2-basic-regression-18-runs-the-gate-for-any-code-change) |
 | R3 | TorchStore: weight transport | [experiment 3](xpu_rl_experiments.md#3-weight-transport-at-scale) |
 | R4 | trainer parallelism (`trn_*` variants) | [experiment 4](xpu_rl_experiments.md#4-trainer-scaling-one-copy-generators-12-single-tile-engines-on-the-last-node) |
 | R5 | generator parallelism (`gen_*` variants) | [experiment 5](xpu_rl_experiments.md#5-generator-scaling-one-engine-trainer-fixed) |
 | R6 | both sides at scale | [experiment 6](xpu_rl_experiments.md#6-both-sides-at-scale) |
 | step 7 / 7b | larger models | [experiment 7](xpu_rl_experiments.md#7-larger-models-flex-attention-config-10-steps) |
-| `parity`, `scaling`, `soak` | deep experiments | claude-skills `xpu_grpo_regression` |
 | transport E1-E5, layers | RDMA probes, microbenchmarks, GRPO A/B | `~/git/claude-skills/knowledge/xpu_rl/transport_experiments_results.md` |
 
 Latest results: `~/git/claude-skills/knowledge/xpu_rl/regression_report.md`; fix history: `~/git/claude-skills/knowledge/xpu_rl/RESULTS.md`; architecture:
@@ -137,19 +136,19 @@ Latest results: `~/git/claude-skills/knowledge/xpu_rl/regression_report.md`; fix
 | 1-T7 | Allocator safe for transfers (upstream: `expandable_segments`) | not set on XPU (corrupts oneCCL transfers) | R3 | review 10-15 | #5402 (draft) |
 | 1-T8 | FSDP2, one node | pass | R4 `trn_t` (1-12 tiles) | done 10-14 | -- |
 | 1-T9 | FSDP2, one copy per node | up to 16 x 12 | R6 (2-16 nodes x 12) | done 10-14 | -- |
-| 1-T10 | FSDP2, one copy across nodes | `1 x 8 / 16 / 32` pass | `all` (16n x 4 `trn_c1`) | done 10-16 | -- |
+| 1-T10 | FSDP2, one copy across nodes | `1 x 8 / 16 / 32` pass | R4 (`trn_c1`) | done 10-16 | -- |
 | 1-T11 | FSDP2, one copy over 96 tiles | pass on torch 2.15 (`trn_n8`, both arms, 10-29); intermittent code 11 on torch 2.14 (1-TS4) | R4 `trn_n8` | workaround 10-29 | -- |
 | 1-T12 | Recipes for nodes x tiles x layouts | `alphabet_sort.py` grid (full / LoRA; `trn_c`, `gen_tp`, `trn_t`, `gen_t`, `batch_scaled`; local `847599960`) | R1-R5 | done 10-14 | -- (local recipes) |
-| 1-T13 | Regression suite | `xpu_grpo_regression`: steps 1-6, `basic` 18, `all` 31, report + deck | R1-R6 | done 10-14 | -- (our tooling) |
+| 1-T13 | Regression suite | `xpu_grpo_regression`: steps 1-7; `pr` (steps 1, 2, 7) per PR, `milestone` (all seven, published report) per milestone | R1-R6 | done 11-09 | -- (our tooling) |
 | 1-T14 | Scale: 1-16 nodes, 1-12 tiles per node | 25/31; failures = 1-TS4, 2-T2 | R6 | done 10-16 | -- |
 | 1-T15 | Save checkpoint | off (`load_only`); OOM in oneCCL at 8n on torch 2.12 | -- | todo | -- |
 | 1-T16 | Prompt data state in checkpoints (#5114) | not on our base | -- | todo | -- (adopt on rebase) |
 | 1-T17 | Rebase: role packages (#5316), generator split (#5317), `ActorSystem` (#5391) | rebased onto main 10-28 (`rl-xpu-aurora-torch215`); main moved again (117 commits by 11-06) | -- | workaround | needed before #5402-#5404 land |
 | 1-T18 | `torch.accelerator` for device / stream / memory (#5450); may shrink 0-T5, 1-T7 | -- | -- | todo | -- (adopt on rebase) |
 | 1-T19 | Weights staged in pinned CPU memory (#4945, #5107); upstream dropped the trainer copy again on 11-06 (generator `cpu_prefetch` / `gpu_fetch`) | not on our base | -- | todo | -- (adopt on rebase) |
-| 1-T20 | Layout parity: upstream TP 2 + TP 2 vs ours, 200 seeded steps | configs ready (local `ed952764d`); not run | `parity` | todo | -- |
-| 1-T21 | Scaling: both sides 2-16n x 12, batch sized to the trainer | configs ready; not run | `scaling` | todo | -- |
-| 1-T22 | Soak: 8n x 12, 1000 steps | config ready; not run | `soak` | todo | -- |
+| 1-T20 | Layout parity: upstream TP 2 + TP 2 vs ours, 200 seeded steps | configs ready (local `ed952764d`); not run | explicit `steps200:` runs | todo | -- |
+| 1-T21 | Scaling: both sides 2-16n x 12, batch sized to the trainer | configs ready; not run | explicit `steps30:...:batch_scaled` runs | todo | -- |
+| 1-T22 | Soak: 8n x 12, 1000 steps | config ready; not run | explicit `steps1000:lora:8:12` | todo | -- |
 
 ### vLLM (generator in the loop)
 

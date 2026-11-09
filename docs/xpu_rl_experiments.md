@@ -3,16 +3,16 @@
 One entry per experiment: what it tests, how to run it, the latest result. Updated at milestones only; every run's
 full results are in its generated regression report. Build and validate: [xpu_torch215.md](xpu_torch215.md); gaps:
 [xpu_rl_roadmap.md](xpu_rl_roadmap.md). Model Qwen3-0.6B (alphabet sort, both arms) unless noted; mesh = trainer
-`dp_replicate x dp_shard`; "group" = `sweep.sh` group of the regression tooling; env = `monarch_t215`.
+`dp_replicate x dp_shard`; "group" = `sweep.sh` step of the regression tooling (`pr` = steps 1, 2, 7; `milestone` = all seven); env = `monarch_t215`.
 
 ### 1. Smoke (after every stack change)
 
-The loop on one host (shared memory) and across nodes (XCCL), 1n / 2n x 4. Group `smoke` (4). Latest: 4/4 (11-09,
-torch 2.15.0 + Monarch main).
+The loop on one host (shared memory) and across nodes (XCCL), 1n / 8n x 4. Group `step1` (4). Latest: 4/4 with the
+earlier 2n x 4 layout (11-09, torch 2.15.0 + Monarch main); 8n x 4 not run yet.
 
 ### 2. Basic regression (18 runs; the gate for any code change)
 
-Default layout at 2n x 1-12 tiles, 16n x 4 / 12, and 10 steps at 1n / 8n. Group `basic` (18). Latest: 18/18, peak
+Default layout at 2n x 1-12 tiles, 16n x 4 / 12, and 10 steps at 1n / 8n. Group `step2` (18). Latest: 18/18, peak
 2134 of 8192 tasks and 128 GB host memory per node (11-09, torch 2.15.0 + Monarch main).
 
 ### 3. Weight transport at scale
@@ -37,7 +37,7 @@ Default layout at 4n / 8n x 12, and the batch sized to the trainer on 2-16 nodes
 
 ### 7. Larger models (flex attention; `CONFIG=...`, 10 steps)
 
-Group `larger` (6). `_flex` = upstream's recipe with flex attention (varlen has no XPU kernel); `_16n_...` = our 16-node layouts (FSDP
+Group `step7` (6). `_flex` = upstream's recipe with flex attention (varlen has no XPU kernel); `_16n_...` = our 16-node layouts (FSDP
 instead of trainer TP / EP, no checkpoint save).
 
 | Model | Layout | Result | Date, stack |
