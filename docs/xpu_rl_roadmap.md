@@ -8,7 +8,7 @@ date). Start point: upstream torchtitan RL ran on CUDA only, and nothing in the 
 
 Contents: [Phases](#phases) - [Phase 0](#phase-0----each-component-on-xpu) -
 [Phase 1](#phase-1----qwen3-06b-grpo-end-to-end) - [Phase 2](#phase-2----bigger-models-more-parallelism) -
-[Phase 3](#phase-3----rdma-on-two-intel-platforms-cxi-aurora-and-bmg) - [Platform support](#platform-support) -
+[Phase 3](#phase-3----rdma-on-three-intel-platforms-cxi-aurora-bmg-and-crescent-island) - [Platform support](#platform-support) -
 [Notes](#notes)
 
 ## Phases
@@ -18,7 +18,7 @@ Contents: [Phases](#phases) - [Phase 0](#phase-0----each-component-on-xpu) -
 | **0** | each component works on its own on XPU | Qwen3-0.6B where a model is needed | TC L0-L4, L5, each repo's own tests |
 | **1** | small-model GRPO end to end, 1-16 nodes | Qwen3-0.6B, full + LoRA | R1 smoke, R2 basic regression, R3 TorchStore weights, R6 both sides at scale |
 | **2** | bigger models, more parallelism on trainer and generator | Qwen3-1.7B .. 30B-A3B, gpt-oss-20b | R4 trainer parallelism, R5 generator parallelism, step 7 / 7b models |
-| **3** | RDMA: one-sided weight and rollout transfer; tracks 3A CXI (Aurora: PVC + Slingshot) and 3B BMG (Arc Battlemage) | Qwen3-0.6B, then 30B-A3B | transport layers; R3 cells A/B against XCCL |
+| **3** | RDMA: one-sided weight and rollout transfer; tracks 3A CXI (Aurora: PVC + Slingshot), 3B BMG (Arc Battlemage) and 3C Crescent Island | Qwen3-0.6B, then 30B-A3B | transport layers; R3 cells A/B against XCCL |
 
 Within a phase rows go stack (S), Monarch (M), TorchStore (TS), torchtitan (T), vLLM (V), in the order they are done;
 IDs are `<phase>-<repo><n>`. Column **Upstream** = what has to land upstream (PR or issue and its state; "--" when
@@ -185,17 +185,18 @@ Phase-1 default: TP 1, one engine per generator tile, data parallel across engin
 | 2-V3 | CUDA / XPU graphs | eager only | -- | todo | -- |
 | 2-V4 | Multi-turn KV hold, sticky routing (#5217-#5220) | not on our base | -- | todo | -- (adopt on rebase) |
 
-## Phase 3 -- RDMA on two Intel platforms: CXI (Aurora) and BMG
+## Phase 3 -- RDMA on three Intel platforms: CXI (Aurora), BMG and Crescent Island
 
-Two tracks. **3A CXI**: Aurora, PVC (Max 1550, 2 tiles per card, used as 12 `FLAT` tiles per node) + 8 HPE Slingshot
+Three tracks. **3A CXI**: Aurora, PVC (Max 1550, 2 tiles per card, used as 12 `FLAT` tiles per node) + 8 HPE Slingshot
 NICs per node, reached through libfabric `cxi`; no ibverbs. **3B BMG**: Intel Arc Battlemage (B-series, one tile per
-card, Xe2); network not decided yet, so 3B lists what each NIC type needs. Both use the same plan: weights and
+card, Xe2); network not decided yet, so 3B lists what each NIC type needs. **3C Crescent Island**: Intel Data Center GPU (Xe3P,
+inference-focused); specs not known yet, so 3C, like 3B, starts with phases 0-1 on the platform. All use the same plan: weights and
 rollouts on PyTorch's `torch.distributed._transport` (11-06: NIXL as the engine, our torch-libfabric as the reference
-and fallback). The shared part below has to land once for both; 3A and 3B add what is platform specific. Upstream order, after
+and fallback). The shared part below has to land once for all; 3A, 3B and 3C add what is platform specific. Upstream order, after
 user review: 3A-S4 (Intel NIXL) -> 3-S2 (PyTorch) -> 3-TS1, 3-TS2 (TorchStore) -> 3-T1 (torchtitan); adopt 3-TS3 / 3-S1 when they
 land; 3-M1 starts as a Monarch RFC; BMG adds 3B-S4.
 
-### 3.0 Shared by both platforms
+### 3.0 Shared by all platforms
 
 | # | Repo | Item | XPU now | Test | Status | Upstream |
 |---|---|---|---|---|---|---|
@@ -242,6 +243,23 @@ one tile per card, so no `FLAT` / implicit-scaling settings.
 | 3B-T1 | torchtitan | GRPO on BMG: a launcher for the BMG cluster (not PBS / PALS), rollouts over `_transport` (3-T1) | not started | R1 / R3 on BMG | todo | launcher for that scheduler, if upstream lacks it |
 
 
+### 3C. Crescent Island (Intel Data Center GPU, Xe3P)
+
+Nothing run on Crescent Island yet. Before RDMA, it needs a pass through phases 0-1 (3C-S1 .. 3C-V1). Specs to
+confirm: tiles per card, memory per card, cards per node, node interconnect, scale-out NIC, cluster and
+scheduler. Already in the code: vllm-xpu-kernels builds Xe3P / CRI targets when `VLLM_XPU_ENABLE_XE3P` is on (Aurora
+builds turn it off).
+
+| # | Repo | Item | XPU now | Test | Status | Upstream |
+|---|---|---|---|---|---|---|
+| 3C-S1 | stack | torch XPU and oneAPI / driver support for Xe3P; `vllm-xpu-kernels` built with its CRI targets; oneCCL / XCCL on CRI | not run | TC L0-L4 on CRI | todo | -- |
+| 3C-S2 | stack | Device layout: tiles per card and how they show up (`ZE_FLAT_DEVICE_HIERARCHY`), memory per tile; adjust the launcher's tile counts and thread caps | specs to confirm | TC L2-L3 | todo | -- |
+| 3C-S3 | stack | Network: scale-out NIC and its RDMA path (then 3.0 applies, as for 3B-S2) | specs to confirm | -- | todo | -- |
+| 3C-M1 | Monarch | Actors on CRI devices (the XPU runtime #4307 should apply as is) | not run | TC L3 | todo | -- |
+| 3C-TS1 | TorchStore | XCCL transport on CRI; RDMA transports once 3C-S3 is known | not run | R3 on CRI | todo | -- |
+| 3C-T1 | torchtitan | GRPO 0.6B smoke and basic on CRI: a launcher for its cluster's scheduler, layouts for its tile count | not started | R1, R2 on CRI | todo | -- |
+| 3C-V1 | vLLM | Generator on CRI first (an inference part): vLLM XPU worker and kernels on Xe3P, generation correctness | not run | `check_compute.pbs` `vllm_generate` on CRI | todo | vLLM / vllm-xpu-kernels |
+
 ## Platform support
 
 Which Intel GPUs the stack targets and how far each is. Phases 0-2 ran on Aurora only; every other platform starts
@@ -251,23 +269,7 @@ with its own pass through phases 0-1.
 |---|---|---|---|---|
 | Aurora | Data Center GPU Max 1550 (PVC, Xe-HPC; 2 tiles per card, 12 `FLAT` tiles per node) | ALCF Aurora | HPE Slingshot, libfabric `cxi` | phases 0-2 done; 3A in progress |
 | BMG | Arc Battlemage (B-series, Xe2; 1 tile per card) | to confirm | not decided (see 3B) | not started ([3B](#3b-bmg-intel-arc-battlemage)) |
-| Crescent Island | Data Center GPU "Crescent Island" (Xe3P; inference-focused, LPDDR5X memory per Intel's announcement) | to confirm | to confirm | not started (below) |
-
-### Crescent Island
-
-Specs to confirm: tiles per card, memory per card, cards per node, node interconnect, scale-out NIC, cluster and
-scheduler. Already in the code: vllm-xpu-kernels builds Xe3P / CRI targets when `VLLM_XPU_ENABLE_XE3P` is on (Aurora
-builds turn it off).
-
-| # | Repo | Item | XPU now | Test | Status | Upstream |
-|---|---|---|---|---|---|---|
-| CRI-S1 | stack | torch XPU and oneAPI / driver support for Xe3P; `vllm-xpu-kernels` built with its CRI targets; oneCCL / XCCL on CRI | not run | TC L0-L4 on CRI | todo | -- |
-| CRI-S2 | stack | Device layout: tiles per card and how they show up (`ZE_FLAT_DEVICE_HIERARCHY`), memory per tile; adjust the launcher's tile counts and thread caps | specs to confirm | TC L2-L3 | todo | -- |
-| CRI-S3 | stack | Network: scale-out NIC and its RDMA path (then 3.0 applies, as for 3B-S2) | specs to confirm | -- | todo | -- |
-| CRI-M1 | Monarch | Actors on CRI devices (the XPU runtime #4307 should apply as is) | not run | TC L3 | todo | -- |
-| CRI-TS1 | TorchStore | XCCL transport on CRI; RDMA transports once CRI-S3 is known | not run | R3 on CRI | todo | -- |
-| CRI-T1 | torchtitan | GRPO 0.6B smoke and basic on CRI: a launcher for its cluster's scheduler, layouts for its tile count | not started | R1, R2 on CRI | todo | -- |
-| CRI-V1 | vLLM | Generator on CRI first (an inference part): vLLM XPU worker and kernels on Xe3P, generation correctness | not run | `check_compute.pbs` `vllm_generate` on CRI | todo | vLLM / vllm-xpu-kernels |
+| Crescent Island | Data Center GPU "Crescent Island" (Xe3P; inference-focused, LPDDR5X memory per Intel's announcement) | to confirm | to confirm | not started ([3C](#3c-crescent-island-intel-data-center-gpu-xe3p)) |
 
 ## Notes
 
