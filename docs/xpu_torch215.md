@@ -263,8 +263,8 @@ hosts and runs `torchtitan.rl.train`.
 
 Sections 1-2 are re-run on this env (torch 2.15.0, Monarch upstream main) on 2026-11-09, after the compute-node
 checks (1 and 2 nodes: torch, vLLM generation, the kernels' flash-attention test, cross-node XCCL broadcast, Monarch
-remote spawn) all passed; sections 3-8 were measured 2026-10-28 .. 11-04 on the previous torch 2.15 nightly stack
-(same vLLM, TorchStore, oneCCL). Model: Qwen3-0.6B, alphabet-sort task, 0/1
+remote spawn) all passed; section 7 marks which rows were re-run here. The rest of sections 3-8 were measured
+2026-10-28 .. 11-04 on the previous torch 2.15 nightly stack (same vLLM, TorchStore, oneCCL). Model: Qwen3-0.6B, alphabet-sort task, 0/1
 reward, `rl_grpo_qwen3_0_6b_{full,lora}_<N>n_ppn<P>[_variant]_<S>steps`, both arms unless noted. Mesh = trainer
 `dp_replicate x dp_shard`.
 
@@ -335,8 +335,8 @@ rebuild its models on flex attention. The `_16n_...` configs also change the lay
 
 | Model | Upstream layout: trainer / generator | Nodes | Result on XPU |
 |---|---|---|---|
-| Qwen3-1.7B (dense) | TP 2 / one engine TP 4 (6 GPUs) | 1 | pass |
-| Qwen3-14B (dense) | TP 8 / one engine TP 8 (16 GPUs) | 2 | pass |
+| Qwen3-1.7B (dense) | TP 2 / one engine TP 4 (6 GPUs) | 1 | 10/10 (this env, 2026-11-09) |
+| Qwen3-14B (dense) | TP 8 / one engine TP 8 (16 GPUs) | 2 | 10/10 (this env, 2026-11-09) |
 | Qwen3-30B-A3B (MoE, 128 experts) | FSDP 2 x TP 2 x EP 4 / DP 2 x TP 2 x EP 4 (8 GPUs) | 1 | fail: exits at generator start with oneCCL KVS errors (open) |
 | gpt-oss-20b (MoE, 32 experts) | TP 2 x EP 2 / TP 4 x EP 4; 5 prompts per step | 1 | fail: trainer out of memory (20B on 2 tiles of 64 GB) |
 | Qwen3.5-9B / Qwen3.6-27B (GDN) | -- | -- | blocked: vLLM's GDN path needs NVIDIA-only CuTe kernels |
@@ -345,10 +345,10 @@ rebuild its models on flex attention. The `_16n_...` configs also change the lay
 
 | Model | Config | Trainer / generator | Result |
 |---|---|---|---|
-| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 FSDP / 8 engines TP 8 | 10/10 |
-| Qwen3-14B | `rl_grpo_qwen3_14b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 FSDP, full activation remat / 8 engines TP 8 | healthy at walltime (~4.5 min/step) |
-| Qwen3-30B-A3B | `rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_trn_c1_gen_c8_10steps` | 1 x 64 FSDP / 8 engines TP 4 x DP 2, EP 8, vLLM at 0.7 of a tile | 10/10 |
-| gpt-oss-20b | `rl_grpo_gpt_oss_20b_flex_16n_ppn4_trn_c1_gen_c8_10steps` | 1 x 32 FSDP (8 nodes x 4) / 8 engines TP 4, EP 4, vLLM at 0.7 | healthy at walltime |
+| Qwen3-1.7B | `rl_grpo_qwen3_1_7b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 FSDP / 8 engines TP 8 | 10/10 (this env, 2026-11-09) |
+| Qwen3-14B | `rl_grpo_qwen3_14b_flex_16n_ppn8_gen_c8_10steps` | 8 x 8 FSDP, full activation remat / 8 engines TP 8 | healthy at walltime (~4.5 min/step; previous stack) |
+| Qwen3-30B-A3B | `rl_grpo_qwen3_30b_a3b_flex_16n_ppn8_trn_c1_gen_c8_10steps` | 1 x 64 FSDP / 8 engines TP 4 x DP 2, EP 8, vLLM at 0.7 of a tile | 10/10 (this env, 2026-11-09; ~40 min) |
+| gpt-oss-20b | `rl_grpo_gpt_oss_20b_flex_16n_ppn4_trn_c1_gen_c8_10steps` | 1 x 32 FSDP (8 nodes x 4) / 8 engines TP 4, EP 4, vLLM at 0.7 | healthy at walltime (previous stack) |
 
 What fails, and why (so these are not retried): a MoE model with one copy per 8-tile node runs out of device memory
 at step 2 when Adam's state appears (~39 GiB gpt-oss, ~57 GiB 30B-A3B per tile); vLLM at the default 0.9 of a tile
