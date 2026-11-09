@@ -17,7 +17,7 @@ Contents: [Phases](#phases) - [Phase 0](#phase-0----each-component-on-xpu) -
 |---|---|---|---|
 | **0** | each component works on its own on XPU | Qwen3-0.6B where a model is needed | TC L0-L4, L5, each repo's own tests |
 | **1** | small-model GRPO end to end, 1-16 nodes | Qwen3-0.6B, full + LoRA | R1 smoke, R2 basic regression, R3 TorchStore weights, R6 both sides at scale |
-| **2** | bigger models, more parallelism on trainer and generator | Qwen3-1.7B .. 30B-A3B, gpt-oss-20b | R4 trainer parallelism, R5 generator parallelism, step 7 / 7b models |
+| **2** | bigger models, more parallelism on trainer and generator | Qwen3-1.7B .. 30B-A3B, gpt-oss-20b | R4 trainer parallelism, R5 generator parallelism, step 7 larger models |
 | **3** | RDMA: one-sided weight and rollout transfer; tracks 3A CXI (Aurora: PVC + Slingshot), 3B BMG (Arc Battlemage) and 3C Crescent Island | Qwen3-0.6B, then 30B-A3B | transport layers; R3 cells A/B against XCCL |
 
 Within a phase rows go stack (S), Monarch (M), TorchStore (TS), torchtitan (T), vLLM (V), in the order they are done;
@@ -44,7 +44,7 @@ phase 3A (CXI) trains GRPO with NIXL weights and rollouts on 2-16 nodes; phase 3
 | R4 | trainer parallelism (`trn_*` variants) | [experiment 4](xpu_rl_experiments.md#4-trainer-scaling-one-copy-generators-12-single-tile-engines-on-the-last-node) |
 | R5 | generator parallelism (`gen_*` variants) | [experiment 5](xpu_rl_experiments.md#5-generator-scaling-one-engine-trainer-fixed) |
 | R6 | both sides at scale | [experiment 6](xpu_rl_experiments.md#6-both-sides-at-scale) |
-| step 7 / 7b | larger models | [experiment 7](xpu_rl_experiments.md#7-larger-models-flex-attention-config-10-steps) |
+| step 7 | larger models | [experiment 7](xpu_rl_experiments.md#7-larger-models-flex-attention-config-10-steps) |
 | transport E1-E5, layers | RDMA probes, microbenchmarks, GRPO A/B | `~/git/claude-skills/knowledge/xpu_rl/transport_experiments_results.md` |
 
 Latest results: `~/git/claude-skills/knowledge/xpu_rl/regression_report.md`; fix history: `~/git/claude-skills/knowledge/xpu_rl/RESULTS.md`; architecture:
@@ -161,8 +161,7 @@ Latest results: `~/git/claude-skills/knowledge/xpu_rl/regression_report.md`; fix
 ### torchtitan (trainer)
 
 Phase-1 default: FSDP2 only, one model copy per trainer node (`dp_replicate` = trainer nodes, `dp_shard` = tiles per
-node). Upstream's base recipe: 2 GPUs, TP 2. Larger models (2-T5a-g): all are in the regression's step 7; only the
-runs that pass every check on the current env (2-T5a, 2-T5b) go into the guide; the rest are planned.
+node). Upstream's base recipe: 2 GPUs, TP 2.
 
 | # | Item | XPU now | Test | Status | Upstream |
 |---|---|---|---|---|---|
@@ -170,13 +169,6 @@ runs that pass every check on the current env (2-T5a, 2-T5b) go into the guide; 
 | 2-T2 | HSDP, 2 copies across nodes | hangs in FSDP2 HSDP on oneCCL (`trn_c2` 2 x 48, both arms, 0 steps, re-confirmed 10-29) | R4 `trn_c2`; L5 `fsdp2_hsdp_hang` | FAILS 10-29 | to file (repro ready; where: user decides) |
 | 2-T3 | Pipeline parallel (#3980); upstream skips per-edge P2P groups on XCCL | not tried | -- | todo | -- |
 | 2-T4 | Context parallel (#5424) | not tried | -- | todo | -- |
-| 2-T5a | Qwen3-14B, upstream layout: trainer TP 8, one TP-8 engine (2 nodes) | 10/10, every check passes (11-09); **in the guide** | step 7 | done 11-09 | -- |
-| 2-T5b | Qwen3-1.7B, 16 nodes: 8 x 8 FSDP, 8 TP-8 engines | 10/10, every check passes (11-09); **in the guide** | step 7 | done 11-09 | -- |
-| 2-T5c | Qwen3-1.7B, upstream layout: trainer TP 2, one TP-4 engine (1 node) | planned: trains 10/10 but fails the logprob-parity check (max 13.3) | step 7 | todo | -- |
-| 2-T5d | Qwen3-30B-A3B, 16 nodes: 1 x 64 FSDP, 8 TP4 x DP2 / EP8 engines, vLLM at 0.7 | planned: trains 10/10 (~40 min) but fails the logprob-parity check (max 24.4) | step 7 | todo | -- |
-| 2-T5e | Qwen3-14B, 16 nodes: 8 x 8 FSDP + full remat, 8 TP-8 engines | planned: still training at walltime on the previous stack (~4.5 min/step); re-run on this env 11-09 | step 7 | todo | -- |
-| 2-T5f | gpt-oss-20b, 16 nodes: 1 x 32 FSDP, 8 TP4 / EP4 engines, vLLM at 0.7 | planned: still training at walltime on the previous stack; re-run on this env 11-09 | step 7 | todo | -- |
-| 2-T5g | Upstream MoE layouts: 30B-A3B (FSDP 2 x TP 2 x EP 4) and gpt-oss-20b (TP 2 x EP 2 on 2 tiles) | planned: 30B-A3B exits at generator start (oneCCL KVS errors); gpt-oss-20b trainer out of memory | explicit `model:qwen3_30b_a3b_flex:1`, `model:gpt_oss_20b_flex:1` | todo | -- |
 | 2-T6 | Newer architectures: Qwen3.5 / 3.6 (GDN), Kimi K3 (KDA), MXFP8 / NVFP4 | GDN needs NVIDIA-only CuTe kernels; MXFP8 / NVFP4 need SM100 | -- | todo | XPU kernels (torch-xpu-ops / Triton) |
 | 2-T7 | Tasks: DAPO-Math, Search-R1, Verifiers, Terminal-Bench | not tried | -- | todo | -- |
 | 2-T8 | Bitwise parity (batch-invariant kernels) | not tried | -- | todo | -- |
@@ -191,6 +183,24 @@ Phase-1 default: TP 1, one engine per generator tile, data parallel across engin
 | 2-V2 | FSDP generator (#4838) | not on our base | -- | todo | -- (adopt on rebase) |
 | 2-V3 | CUDA / XPU graphs | eager only | -- | todo | -- |
 | 2-V4 | Multi-turn KV hold, sticky routing (#5217-#5220) | not on our base | -- | todo | -- (adopt on rebase) |
+| 2-V5 | Expert / data parallel engines for MoE: TP 4 x DP 2 / EP 8 (Qwen3-30B-A3B), TP 4 / EP 4 (gpt-oss-20b), across nodes | works at 16 nodes with the 0.7 memory limit (2-V6) | step 7 (2-T5d, 2-T5f) | workaround 10-29 | -- |
+| 2-V6 | Weight load holds the sharded and the unsharded copy at once; vLLM's memory sizing does not count it | at the default 0.9 of a tile the first forward fails (`UR_RESULT_ERROR_OUT_OF_RESOURCES`); `gpu_memory_limit` 0.7 works | step 7 (2-T5d, 2-T5f) | workaround 10-29 | vLLM (profile run under-counts) |
+
+### Larger models (trainer + generator)
+
+Each run is a layout of both sides. All are in the regression's step 7 (except 2-T5g); only the runs that pass every
+check on the current env (2-T5a, 2-T5b) go into the guide; the rest are planned. Generator side: 2-V1 (TP), 2-V5
+(MoE expert / data parallel), 2-V6 (memory).
+
+| # | Item | XPU now | Test | Status | Upstream |
+|---|---|---|---|---|---|
+| 2-T5a | Qwen3-14B, upstream layout: trainer TP 8, one TP-8 engine (2 nodes) | 10/10, every check passes (11-09); **in the guide** | step 7 | done 11-09 | -- |
+| 2-T5b | Qwen3-1.7B, 16 nodes: 8 x 8 FSDP, 8 TP-8 engines | 10/10, every check passes (11-09); **in the guide** | step 7 | done 11-09 | -- |
+| 2-T5c | Qwen3-1.7B, upstream layout: trainer TP 2, one TP-4 engine (1 node) | planned: trains 10/10 but fails the logprob-parity check (max 13.3) | step 7 | todo | -- |
+| 2-T5d | Qwen3-30B-A3B, 16 nodes: 1 x 64 FSDP, 8 TP4 x DP2 / EP8 engines, vLLM at 0.7 | planned: trains 10/10 (~40 min) but fails the logprob-parity check (max 24.4) | step 7 | todo | -- |
+| 2-T5e | Qwen3-14B, 16 nodes: 8 x 8 FSDP + full remat, 8 TP-8 engines | planned: still training at walltime on the previous stack (~4.5 min/step); re-run on this env 11-09 | step 7 | todo | -- |
+| 2-T5f | gpt-oss-20b, 16 nodes: 1 x 32 FSDP, 8 TP4 / EP4 engines, vLLM at 0.7 | planned: still training at walltime on the previous stack; re-run on this env 11-09 | step 7 | todo | -- |
+| 2-T5g | Upstream MoE layouts: 30B-A3B (FSDP 2 x TP 2 x EP 4) and gpt-oss-20b (TP 2 x EP 2 on 2 tiles) | planned: 30B-A3B exits at generator start (oneCCL KVS errors); gpt-oss-20b trainer out of memory | explicit `model:qwen3_30b_a3b_flex:1`, `model:gpt_oss_20b_flex:1` | todo | -- |
 
 ## Phase 3 -- RDMA on three Intel platforms: CXI (Aurora), BMG and Crescent Island
 
