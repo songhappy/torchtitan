@@ -94,7 +94,7 @@ Phase-1 defaults: trainer FSDP2, one copy per node; generators one TP-1 engine p
 
 One plan for all platforms (hardware: [Platform support](#platform-support)): weights and rollouts over PyTorch's
 `torch.distributed._transport`, NIXL as the engine, our torch-libfabric as the reference. Upstream order: 3A-S4 ->
-3-S2 -> 3-TS1, 3-TS2 -> 3-T1; 3-M1 starts as a Monarch RFC.
+3-S2 -> 3-TS1 -> 3-T1; 3-M1 starts as a Monarch RFC.
 
 ### 3.0 Shared by all platforms
 
@@ -105,7 +105,7 @@ One plan for all platforms (hardware: [Platform support](#platform-support)): we
 | 3&#8209;S3 | PyTorch | Stream-ordered transport ops for XPU | optional | todo | PyTorch PR |
 | 3&#8209;M1 | Monarch | RDMA in Monarch for XPU (build without CUDA, Level Zero memory, a backend per NIC) | not built on XPU | todo | Monarch RFC |
 | 3&#8209;TS1 | TorchStore | Stream sync before DMA on any accelerator | done locally | review 11-05 | TorchStore PR (local) |
-| 3&#8209;TS2 | TorchStore | Backend options for `torch.distributed._transport` | done locally | review 11-09 | TorchStore PR (local) |
+| 3&#8209;TS2 | TorchStore | Choose NIXL's libfabric plugin | a named backend (`nixl_lf` entry point) via the existing backend setting | workaround 11-10 | -- (no TorchStore change) |
 | 3&#8209;TS3 | TorchStore | One NIXL agent per process | works with #272 | workaround 11-06 | #272 (open) |
 | 3&#8209;TS4 | TorchStore | Its own NIXL and TorchComms transports | TorchComms is CUDA + InfiniBand | todo | -- |
 | 3&#8209;TS5 | TorchStore | Direct RDMA, MonarchRDMA transport | need 3-M1 | todo | -- |
