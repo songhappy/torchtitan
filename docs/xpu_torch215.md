@@ -202,7 +202,7 @@ running, 5 total.
 - every requested step logs `Train | Step: N` (larger models: still training at walltime also passes);
 - reward non-zero from step 1 (an occasional `Consecutive untrainable batches: 1/10` is fine; climbing to 10 means
   the generators got zero weights);
-- `grad_norm` (Qwen3-0.6B): LoRA ~0.01-0.8, full ~0.1-5;
+- `grad_norm` (Qwen3-0.6B): LoRA ~0.01-1.2, full ~0.1-8;
 - the `Mesh split` line in `train.log` shows the expected trainer and generator meshes (multi-node runs).
 
 ## Validation
