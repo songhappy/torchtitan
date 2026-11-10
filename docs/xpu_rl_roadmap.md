@@ -7,8 +7,10 @@ their status. Build, run and validate: [xpu_torch215.md](xpu_torch215.md). Updat
 |---|---|
 | **0** | each component works on its own on XPU |
 | **1** | Qwen3-0.6B GRPO end to end, 1-16 nodes |
-| **2** | bigger models, more parallelism (trainer and generator) |
+| **2** | enable bigger models, more parallelism and advanced trainer/vllm features (trainer and generator) |
 | **3** | RDMA weight and rollout transfer: 3A CXI (Aurora), 3B BMG, 3C Crescent Island |
+| **4** | Demonstrate numerical parity and competitive performance for RL using bigger models |
+
 
 IDs are `<phase>-<repo><n>` (S stack, M Monarch, TS TorchStore, T torchtitan, V vLLM). Status: `done`,
 `workaround`, `review` (done, PR open or local), `FAILS`, `todo`; dates 2026.
@@ -61,10 +63,9 @@ torchtitan PRs are in review; larger models run with workarounds; one-sided tran
 | 1&#8209;T17 | Keep up with upstream main | rebased 10-28; main moved since | workaround | before #5402-#5404 land |
 | 1&#8209;T18 | `torch.accelerator` for device / stream / memory (#5450) | not on our base | todo | adopt on rebase |
 | 1&#8209;T19 | Weights staged in pinned CPU memory (#4945, #5107) | not on our base | todo | adopt on rebase |
-| 1&#8209;T23 | Training throughput: 8-node full ~30% slower than on torch 2.12 | not investigated | todo | -- |
 | 1&#8209;V1 | vLLM in the RL loop: eager, XPU attention, `XPUWorker` (upstream: CUDA graphs, CUDA-only worker) | works, 96 generators | review 10-15 | #5402 (draft) |
 
-## Phase 2 -- bigger models, more parallelism
+## Phase 2 -- bigger models, more parallelism, advanced trainer and vLLM features
 
 Phase-1 defaults: trainer FSDP2, one copy per node; generators one TP-1 engine per tile.
 
@@ -76,7 +77,6 @@ Phase-1 defaults: trainer FSDP2, one copy per node; generators one TP-1 engine p
 | 2&#8209;T4 | Context parallel (#5424) | not tried | todo | -- |
 | 2&#8209;T6 | Newer architectures: GDN, KDA, MXFP8 / NVFP4 | need NVIDIA-only kernels | todo | XPU kernels |
 | 2&#8209;T7 | Tasks: DAPO-Math, Search-R1, Verifiers, Terminal-Bench | not tried | todo | -- |
-| 2&#8209;T8 | Bitwise parity (batch-invariant kernels) | not tried | todo | -- |
 | 2&#8209;T9 | GraphTrainer (whole step as one FX graph; CUDA-only CI) | not tried | todo | torchtitan experiment |
 | 2&#8209;V1 | Generator TP 2 / 4 / 8, also across nodes | works with a oneCCL setting | workaround 10-16 | oneCCL #222 |
 | 2&#8209;V2 | FSDP generator (#4838) | not on our base | todo | adopt on rebase |
@@ -149,6 +149,15 @@ Requires `EnableImplicitScaling=0 NEOReadDebugKeys=1`, else cxi rejects Level Ze
 | 3C&#8209;TS1 | TorchStore | XCCL, then RDMA transports | not run | todo | -- |
 | 3C&#8209;T1 | torchtitan | GRPO 0.6B smoke and basic regression | not started | todo | -- |
 | 3C&#8209;V1 | vLLM | Generator on Xe3P (an inference part) | not run | todo | vLLM / vllm-xpu-kernels |
+
+## Phase 4 -- numerical parity and competitive performance (bigger models)
+
+| # | Item | XPU now | Status | Upstream |
+|---|---|---|---|---|
+| 4&#8209;T1 | Logprob parity, trainer vs generator, on the larger models | mean small; max > 10 on 2-T5c, 2-T5d; cause unknown | todo | -- |
+| 4&#8209;T2 | Bitwise parity (batch-invariant kernels) | not tried | todo | -- |
+| 4&#8209;T3 | Training throughput: 8-node full ~30% slower than on torch 2.12 | not investigated | todo | -- |
+| 4&#8209;T4 | Training and generation throughput vs CUDA, same models and layouts | not measured | todo | -- |
 
 ## Platform support
 
