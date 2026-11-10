@@ -86,8 +86,6 @@ Phase-1 defaults: trainer FSDP2, one copy per node; generators one TP-1 engine p
 | 2&#8209;V6 | Weight load holds two copies; vLLM's memory sizing misses it | works at 0.7 of a tile | workaround 10-29 | vLLM |
 | 2&#8209;T5a | Qwen3-14B, upstream layout (2 nodes) | works; in the guide | done 11-09 | -- |
 | 2&#8209;T5b | Qwen3-1.7B, 16 nodes | works; in the guide | done 11-09 | -- |
-| 2&#8209;T5c | Qwen3-1.7B, upstream layout (1 node) | logprob-parity max > 10 | todo | -- |
-| 2&#8209;T5d | Qwen3-30B-A3B, 16 nodes | logprob-parity max > 10 | todo | -- |
 | 2&#8209;T5e | Qwen3-14B, 16 nodes | works (11-09) | todo | -- |
 | 2&#8209;T5f | gpt-oss-20b, 16 nodes | tokenizer vocab not cached on compute nodes | todo | -- |
 | 2&#8209;T5g | Upstream MoE layouts (30B-A3B, gpt-oss-20b) | oneCCL errors; out of memory | todo | -- |
@@ -154,7 +152,9 @@ Requires `EnableImplicitScaling=0 NEOReadDebugKeys=1`, else cxi rejects Level Ze
 
 | # | Item | XPU now | Status | Upstream |
 |---|---|---|---|---|
-| 4&#8209;T1 | Logprob parity, trainer vs generator, on the larger models | mean small; max > 10 on 2-T5c, 2-T5d; cause unknown | todo | -- |
+| 4&#8209;T1 | Logprob parity, trainer vs generator, on the larger models | mean small; max > 10 (4-T1a, 4-T1b); cause unknown | todo | -- |
+| 4&#8209;T1a | Qwen3-1.7B, upstream layout (1 node) | trains; logprob-parity max 13.3 | todo | -- |
+| 4&#8209;T1b | Qwen3-30B-A3B, 16 nodes | trains; logprob-parity max 24.4 | todo | -- |
 | 4&#8209;T2 | Bitwise parity (batch-invariant kernels) | not tried | todo | -- |
 | 4&#8209;T3 | Training throughput: 8-node full ~30% slower than on torch 2.12 | not investigated | todo | -- |
 | 4&#8209;T4 | Training and generation throughput vs CUDA, same models and layouts | not measured | todo | -- |
