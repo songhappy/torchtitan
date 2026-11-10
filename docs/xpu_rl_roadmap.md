@@ -86,7 +86,7 @@ Phase-1 defaults: trainer FSDP2, one copy per node; generators one TP-1 engine p
 | 2&#8209;V6 | Weight load holds two copies; vLLM's memory sizing misses it | works at 0.7 of a tile | workaround 10-29 | vLLM |
 | 2&#8209;T5a | Qwen3-14B, upstream layout (2 nodes) | works; in the guide | done 11-09 | -- |
 | 2&#8209;T5b | Qwen3-1.7B, 16 nodes | works; in the guide | done 11-09 | -- |
-| 2&#8209;T5e | Qwen3-14B, 16 nodes | works (11-09) | todo | -- |
+| 2&#8209;T5e | Qwen3-14B, 16 nodes | works | done 11-09 | -- |
 | 2&#8209;T5f | gpt-oss-20b, 16 nodes | tokenizer vocab not cached on compute nodes | todo | -- |
 | 2&#8209;T5g | Upstream MoE layouts (30B-A3B, gpt-oss-20b) | oneCCL errors; out of memory | todo | -- |
 
