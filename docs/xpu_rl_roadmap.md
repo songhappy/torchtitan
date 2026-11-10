@@ -102,10 +102,13 @@ order: 3A-S4 -> 3-S2 -> 3-TS1 -> 3-TS6; 3-M1 starts as a Monarch RFC.
 | # | Repo | Item | XPU now | Status | Upstream |
 |---|---|---|---|---|---|
 | 3&#8209;S1 | PyTorch | One `_transport` endpoint per process | works with #202534 | workaround 11-06 | #202534 (open) |
-| 3&#8209;S2 | PyTorch | NIXL adapter accepts XPU tensors | done locally | review 11-09 | PyTorch PR (local) |
+| 3&#8209;S2 | PyTorch | NIXL adapter accepts XPU tensors | pushed 11-10 (T3) | review 11-10 | PyTorch PR (to open) |
 | 3&#8209;S3 | PyTorch | Stream-ordered transport ops for XPU | optional | todo | PyTorch PR |
-| 3&#8209;M1 | Monarch | RDMA in Monarch for XPU (build without CUDA, Level Zero memory, a backend per NIC) | not built on XPU | todo | Monarch RFC |
-| 3&#8209;TS1 | TorchStore | Stream sync before DMA on any accelerator | done locally | review 11-05 | TorchStore PR (local) |
+| 3&#8209;M1 | Monarch | Monarch RDMA (`RDMABuffer`) on XPU, in three PRs (3-M1a/b/c); then upstream rollouts and TorchStore's MonarchRDMA run unchanged | not built on XPU | todo | Monarch RFC |
+| 3&#8209;M1a | Monarch | Build RDMA without CUDA / ROCm: gate rdmaxcel's device code on features (upstream TODO, `setup.py`) | not started | todo | Monarch PR |
+| 3&#8209;M1b | Monarch | XPU memory in `local_memory.rs` (Level Zero pointer query, device <-> host copy); `RDMABuffer` works over the TCP backend | not started | todo | Monarch PR |
+| 3&#8209;M1c | Monarch | libfabric `RdmaBackend` (`fi_mr_reg` with `FI_HMEM_ZE`, `fi_read` / `fi_write`, completion actor); ported from torch-libfabric; CI on libfabric's `tcp` provider | not started | todo | Monarch PR |
+| 3&#8209;TS1 | TorchStore | Stream sync before DMA on any accelerator | pushed 11-10 (T1) | review 11-10 | TorchStore PR (to open) |
 | 3&#8209;TS2 | TorchStore | Choose NIXL's libfabric plugin | a named backend (`nixl_lf` entry point) via the existing backend setting | workaround 11-10 | -- (no TorchStore change) |
 | 3&#8209;TS3 | TorchStore | One NIXL agent per process | works with #272 | workaround 11-06 | #272 (open) |
 | 3&#8209;TS4 | TorchStore | Its own NIXL and TorchComms transports | TorchComms is CUDA + InfiniBand | todo | -- |
@@ -124,7 +127,7 @@ Requires `EnableImplicitScaling=0 NEOReadDebugKeys=1`, else cxi rejects Level Ze
 | 3A&#8209;S2 | stack | torch-libfabric `_transport` backend (reference) | works, 21 GB/s per NIC | workaround 11-05 | -- (local) |
 | 3A&#8209;S3 | NIXL | Level Zero over libfabric `cxi` | Intel's series, from source; known issue: writes ~1.5x slower than torch-libfabric at 552 KB (GRPO's size), faster above 1 MiB | workaround 11-06 | Intel series (unmerged) |
 | 3A&#8209;S4 | NIXL | cxi writes fail (`FI_REMOTE_CQ_DATA`) | 1-line fix, local | review 11-06 | Intel series |
-| 3A&#8209;M1 | Monarch | `cxi` backend for Monarch RDMA | after 3-M1 | todo | Monarch PR |
+| 3A&#8209;M1 | Monarch | Monarch RDMA over `cxi`: the 3-M1c libfabric backend on Aurora, target 21 GB/s per NIC | after 3-M1c | todo | Monarch PR |
 | 3A&#8209;TS1 | TorchStore | GRPO weights over `_transport` vs XCCL | 2n x 4 pull: torch-libfabric 0.29 s, NIXL 0.32 s, XCCL 0.95 s; 16n x 12 one copy runs (XCCL cannot) | workaround 11-09 | after 3.0 |
 
 ### 3B. BMG (Intel Arc Battlemage)
@@ -135,7 +138,7 @@ Requires `EnableImplicitScaling=0 NEOReadDebugKeys=1`, else cxi rejects Level Ze
 | 3B&#8209;S2 | stack | Pick the NIC (ibverbs, Level Zero IPC, or Ethernet), then its GPU-direct path | not decided | todo | -- |
 | 3B&#8209;S3 | stack | One-sided XPU -> XPU read with that NIC | not run | todo | -- |
 | 3B&#8209;S4 | NIXL | Level Zero memory on that NIC's plugin | to check | todo | NIXL |
-| 3B&#8209;M1 | Monarch | Monarch's ibverbs backend with Level Zero memory | after 3-M1 | todo | Monarch PR |
+| 3B&#8209;M1 | Monarch | Monarch's ibverbs backend with Level Zero memory (if BMG has ibverbs NICs) | after 3-M1b | todo | Monarch PR |
 | 3B&#8209;T1 | torchtitan | GRPO on BMG: launcher for its scheduler | not started | todo | -- |
 
 ### 3C. Crescent Island (Intel Data Center GPU, Xe3P)
