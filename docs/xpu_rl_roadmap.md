@@ -120,7 +120,7 @@ Requires `EnableImplicitScaling=0 NEOReadDebugKeys=1`, else cxi rejects Level Ze
 |---|---|---|---|---|---|
 | 3A&#8209;S1 | stack | One-sided XPU -> XPU read over cxi | 21 GB/s (XCCL 12) | done 11-05 | -- |
 | 3A&#8209;S2 | stack | torch-libfabric `_transport` backend (reference) | works, 21 GB/s per NIC | workaround 11-05 | -- (local) |
-| 3A&#8209;S3 | NIXL | Level Zero over libfabric `cxi` | Intel's series, from source | workaround 11-06 | Intel series (unmerged) |
+| 3A&#8209;S3 | NIXL | Level Zero over libfabric `cxi` | Intel's series, from source; known issue: writes ~1.5x slower than torch-libfabric at 552 KB (GRPO's size), faster above 1 MiB | workaround 11-06 | Intel series (unmerged) |
 | 3A&#8209;S4 | NIXL | cxi writes fail (`FI_REMOTE_CQ_DATA`) | 1-line fix, local | review 11-06 | Intel series |
 | 3A&#8209;M1 | Monarch | `cxi` backend for Monarch RDMA | after 3-M1 | todo | Monarch PR |
 | 3A&#8209;TS1 | TorchStore | GRPO weights over `_transport` vs XCCL | 2n x 4 pull: torch-libfabric 0.29 s, NIXL 0.32 s, XCCL 0.95 s; 16n x 12 one copy runs (XCCL cannot) | workaround 11-09 | after 3.0 |
