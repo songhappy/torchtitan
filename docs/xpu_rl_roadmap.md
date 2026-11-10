@@ -5,7 +5,7 @@ their status. Build, run and validate: [xpu_torch215.md](xpu_torch215.md). Updat
 
 | Phase | Goal |
 |---|---|
-| **0** | each component works on its own on XPU |
+| **0** | monarch hyperactor support on XPU; torchstore xccl backend support |
 | **1** | Qwen3-0.6B GRPO end to end, 1-16 nodes |
 | **2** | enable bigger models, more parallelism and advanced trainer/vllm features (trainer and generator) |
 | **3** | RDMA weight and rollout transfer: 3A CXI (Aurora), 3B BMG, 3C Crescent Island |
@@ -92,9 +92,10 @@ Phase-1 defaults: trainer FSDP2, one copy per node; generators one TP-1 engine p
 
 ## Phase 3 -- RDMA on three Intel platforms: CXI (Aurora), BMG and Crescent Island
 
-One plan for all platforms (hardware: [Platform support](#platform-support)): weights and rollouts over PyTorch's
-`torch.distributed._transport`, NIXL as the engine, our torch-libfabric as the reference. Upstream order: 3A-S4 ->
-3-S2 -> 3-TS1 -> 3-T1; 3-M1 starts as a Monarch RFC.
+One plan for all platforms (hardware: [Platform support](#platform-support)). Weights (decided 11-10): TorchStore's
+TorchDistributed transport (#232) over PyTorch's `torch.distributed._transport`, NIXL as the engine, our
+torch-libfabric as the reference. Rollouts: upstream uses Monarch RDMA; 3-T1 (`_transport`) until 3-M1. Upstream
+order: 3A-S4 -> 3-S2 -> 3-TS1 -> 3-TS6; 3-M1 starts as a Monarch RFC.
 
 ### 3.0 Shared by all platforms
 
@@ -109,6 +110,7 @@ One plan for all platforms (hardware: [Platform support](#platform-support)): we
 | 3&#8209;TS3 | TorchStore | One NIXL agent per process | works with #272 | workaround 11-06 | #272 (open) |
 | 3&#8209;TS4 | TorchStore | Its own NIXL and TorchComms transports | TorchComms is CUDA + InfiniBand | todo | -- |
 | 3&#8209;TS5 | TorchStore | Direct RDMA, MonarchRDMA transport | need 3-M1 | todo | -- |
+| 3&#8209;TS6 | TorchStore | Registration cache for the TorchDistributed transport (every request registers every tensor) | not started | todo | TorchStore PR (#232 follow-up) |
 | 3&#8209;T1 | torchtitan | Rollout microbatches read one-sided (upstream: Monarch RDMA) | works, 167x on 38 MiB | workaround 11-06 | torchtitan PR after 3-S2 |
 | 3&#8209;V1 | vLLM | vLLM's own weight-transfer engines | CUDA only; not needed | todo | -- |
 
