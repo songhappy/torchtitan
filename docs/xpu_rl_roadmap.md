@@ -8,7 +8,7 @@ their status. Build, run and validate: [xpu_torch215.md](xpu_torch215.md). Updat
 | **0** | monarch hyperactor support on XPU; torchstore xccl backend support |
 | **1** | Qwen3-0.6B GRPO end to end, 1-16 nodes |
 | **2** | enable bigger models, more parallelism and advanced trainer/vllm features (trainer and generator) |
-| **3** | RDMA weight and rollout transfer: 3A CXI (Aurora), 3B BMG, 3C Crescent Island |
+| **3** | RDMA weight transport; RDMA rollout transport. 3A CXI (Aurora), 3B BMG, 3C Crescent Island |
 | **4** | Demonstrate numerical parity and competitive performance for RL using bigger models |
 
 
