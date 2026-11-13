@@ -106,7 +106,7 @@ order: 3A-S4 -> 3-S2 -> 3-TS1 -> 3-TS6; 3-M1 starts as a Monarch RFC.
 | 3&#8209;S3 | PyTorch | Stream-ordered transport ops for XPU | optional | todo | PyTorch PR |
 | 3&#8209;M1 | Monarch | Monarch RDMA (`RDMABuffer`) on XPU, in three PRs (3-M1a/b/c); then upstream rollouts and TorchStore's MonarchRDMA run unchanged | not built on XPU | todo | Monarch RFC |
 | 3&#8209;M1a | Monarch | Build RDMA without CUDA / ROCm: `rdmaxcel-sys` (ibverbs + CUDA) behind a default-on `ibverbs` feature (upstream TODO, `setup.py`) | builds on XPU with the TCP backend; its tests 19/20 (the 1 is an upstream test bug) | review 11-11 | Monarch PR (local) |
-| 3&#8209;M1b | Monarch | XPU memory in `local_memory.rs` (Level Zero pointer query, device <-> host copy); `RDMABuffer` works over the TCP backend | not started | todo | Monarch PR |
+| 3&#8209;M1b | Monarch | XPU memory in `local_memory.rs` (Level Zero pointer query, device <-> host copy); `RDMABuffer` works over the TCP backend | Rust done: XPU tile -> tile write and round trip over TCP pass; Python `RDMABuffer` on XPU tensors not yet | review 11-13 | Monarch PR (local) |
 | 3&#8209;M1c | Monarch | libfabric `RdmaBackend` (`fi_mr_reg` with `FI_HMEM_ZE`, `fi_read` / `fi_write`, completion actor); ported from torch-libfabric; CI on libfabric's `tcp` provider | not started | todo | Monarch PR |
 | 3&#8209;TS1 | TorchStore | Stream sync before DMA on any accelerator | pushed 11-10 (T1) | review 11-10 | TorchStore PR (to open) |
 | 3&#8209;TS2 | TorchStore | Choose NIXL's libfabric plugin | a named backend (`nixl_lf` entry point) via the existing backend setting | workaround 11-10 | -- (no TorchStore change) |
