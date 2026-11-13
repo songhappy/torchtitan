@@ -102,8 +102,8 @@ order: 3A-S4 -> 3-S2 -> 3-TS1 -> 3-TS6; 3-M1 starts as a Monarch RFC.
 | # | Repo | Item | XPU now | Status | Upstream |
 |---|---|---|---|---|---|
 | 3&#8209;S1 | PyTorch | One `_transport` endpoint per process | works with #202534 | workaround 11-06 | #202534 (open) |
-| 3&#8209;S2 | PyTorch | NIXL adapter accepts accelerator tensors; stream ops on any accelerator | approved 11-13 (d4l3k) | review 11-13 | #204313 |
-| 3&#8209;S3 | PyTorch | Stream-ordered transport ops for XPU | optional | todo | PyTorch PR |
+| 3&#8209;S2 | PyTorch | NIXL adapter accepts accelerator tensors | approved 11-13 (d4l3k) | review 11-13 | #204313 |
+| 3&#8209;S3 | PyTorch | Stream-ordered transport ops for XPU, same as CUDA (needs an XPU stream host-callback primitive, e.g. SYCL `host_task`) | research local (`nixl-transport-xpu-stream`) | todo | XPU stream API, then `_transport` |
 | 3&#8209;M1 | Monarch | Monarch RDMA (`RDMABuffer`) on XPU, in three PRs (3-M1a/b/c); then upstream rollouts and TorchStore's MonarchRDMA run unchanged | proof of concept works: GRPO 10/10 at 2n x 4 to 16n x 12 with upstream's rollout RDMA path (wait median 1.5-2.3 ms), parity normal | review 11-13 | Monarch RFC (local POC) |
 | 3&#8209;M1a | Monarch | Build RDMA without CUDA / ROCm: `rdmaxcel-sys` (ibverbs + CUDA) behind a default-on `ibverbs` feature (upstream TODO, `setup.py`) | builds on XPU with the TCP backend; its tests 19/20 (the 1 is an upstream test bug) | review 11-11 | Monarch PR (local) |
 | 3&#8209;M1b | Monarch | XPU memory in `local_memory.rs` (Level Zero pointer query, device <-> host copy); `RDMABuffer` works over the TCP backend | XPU tile -> tile over TCP pass (Rust); Python `RDMABuffer` on XPU tensors works over libfabric (2 actors, 64 MiB, 17.5 GB/s on 1 node) | review 11-13 | Monarch PR (local) |
